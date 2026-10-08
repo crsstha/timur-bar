@@ -1,0 +1,770 @@
+#!/usr/bin/env python3
+"""GTK popup for timur-bar on i3/X11, the same panel the Omarchy bar opens.
+
+  timur-panel              open (or close, if already open) on the Time entry tab
+  timur-panel journal      open on the Journal note tab
+  timur-panel --yesterday  start on yesterday
+
+One instance: running it again toggles the open window. It reads
+~/.cache/timur-bar/state.json and runs `timur-bar` for every change, like
+Panel.qml. Needs python-gobject and gtk3.
+
+  TIMUR_PANEL_OFFSET  pixels between the top of the monitor and the panel (bar height, default 30)
+"""
+
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+
+STATE = Path.home() / ".cache/timur-bar/state.json"
+WIDTH = 520
+MAX_TASK_ROWS = 4
+EXPIRY_WARN_DAYS = 3
+STATUS_ORDER = ["TODO", "DOING", "DONE"]
+TOP_OFFSET = int(os.environ.get("TIMUR_PANEL_OFFSET", "30"))
+
+
+def find_cli():
+    if os.environ.get("TIMUR_BAR_CLI"):
+        return os.environ["TIMUR_BAR_CLI"]
+    sibling = Path(__file__).resolve().parent.parent / "bin" / "timur-bar"
+    return str(sibling) if sibling.exists() else (shutil.which("timur-bar") or "timur-bar")
+
+
+CLI = find_cli()
+
+CSS = b"""
+window.timur { background: #1b1e26; border: 2px solid #7aa2f7; }
+.timur * { color: #c0c5ce; font-family: monospace; font-size: 10pt; text-shadow: none; -gtk-icon-shadow: none; }
+.timur .title { font-weight: bold; font-size: 12pt; }
+.timur .section { color: #7c8494; font-size: 9pt; letter-spacing: 1px; }
+.timur .dim { color: #7c8494; }
+.timur .accent { color: #7aa2f7; }
+.timur .urgent { color: #e06c75; }
+.timur .banner { background: #232a3d; border-radius: 3px; padding: 4px 8px; }
+.timur entry { background: #232733; border: 1px solid #3b4252; border-radius: 3px; padding: 4px 8px;
+               box-shadow: none; min-height: 22px; }
+.timur entry:focus { border-color: #7aa2f7; }
+.timur button { background: #1b1e26; background-image: none; border: 1px solid #4c566a; border-radius: 3px;
+                padding: 3px 10px; box-shadow: none; min-height: 22px; }
+.timur button:hover { background: #2a2f3c; }
+.timur button:checked { background: #353b4a; border-color: #7c8494; }
+.timur button:disabled { opacity: 0.5; }
+.timur button.flat { border-color: transparent; padding: 1px 6px; min-height: 0; }
+.timur button.flat:hover { border-color: #4c566a; }
+.timur list, .timur row { background: transparent; }
+.timur row { padding: 3px 8px; border-radius: 3px; }
+.timur row:selected, .timur row:hover { background: #262c3a; }
+.timur row.editing { background: #232a3d; }
+.timur row.confirming { background: #3a2329; }
+.timur textview, .timur textview text { background: #1b1e26; }
+.timur separator { background: #2e3440; min-height: 1px; }
+.timur menu, .timur menuitem { background: #232733; }
+"""
+
+
+def iso(day):
+    return day.isoformat()
+
+
+def format_minutes(minutes):
+    minutes = round(minutes or 0)
+    hours, rest = divmod(minutes, 60)
+    return f"{rest}m" if hours == 0 else f"{hours}h" + (f"{rest:02d}" if rest else "")
+
+
+def parse_duration(text):
+    """Hours by default: 1 · 1.5 · .5 · 2h · 1h30 · 1:30; minutes need 'm': 45m. 0 if invalid or > 24h."""
+    s = re.sub(r"\s+", "", str(text or "").lower())
+    minutes = 0
+    if m := re.fullmatch(r"(\d+):([0-5]\d)", s):
+        minutes = int(m[1]) * 60 + int(m[2])
+    elif m := re.fullmatch(r"(\d+(?:\.\d+)?)h(?:(\d+)m?)?", s):
+        minutes = round(float(m[1]) * 60) + int(m[2] or 0)
+    elif m := re.fullmatch(r"(\d+)m", s):
+        minutes = int(m[1])
+    elif m := re.fullmatch(r"(\d*\.?\d+)", s):
+        minutes = round(float(m[1]) * 60)
+    return minutes if 0 < minutes <= 24 * 60 else 0
+
+
+def notify(summary, icon="appointment-new"):
+    subprocess.Popen(["notify-send", "--app-name=Timur", f"--icon={icon}", "Timur", summary])
+
+
+def label(text="", *classes, xalign=0.0, ellipsize=None, chars=None, wrap=False):
+    widget = Gtk.Label(label=text, xalign=xalign)
+    for c in classes:
+        widget.get_style_context().add_class(c)
+    if ellipsize:
+        widget.set_ellipsize(ellipsize)
+        widget.set_max_width_chars(1)  # GTK3 otherwise asks for the full text width and stretches the panel
+    if chars:
+        widget.set_width_chars(chars)
+        widget.set_max_width_chars(chars)
+    if wrap:
+        widget.set_line_wrap(True)
+        widget.set_max_width_chars(60)
+    return widget
+
+
+def set_classes(widget, *classes):
+    ctx = widget.get_style_context()
+    for c in ("dim", "accent", "urgent"):
+        ctx.remove_class(c)
+    for c in classes:
+        if c:
+            ctx.add_class(c)
+
+
+def toggle_group(options, on_change):
+    """Linked buttons acting as one choice (like the panel's ButtonGroup). Returns (box, {value: button})."""
+    box = Gtk.Box(spacing=4)
+    buttons, first = {}, None
+    for value, text in options:
+        button = Gtk.RadioButton.new_with_label_from_widget(first, text)
+        button.set_mode(False)
+        button.connect("toggled", lambda b, v=value: b.get_active() and on_change(v))
+        first = first or button
+        buttons[value] = button
+        box.pack_start(button, False, False, 0)
+    return box, buttons
+
+
+class Panel(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Timur")
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_type_hint(Gdk.WindowTypeHint.DIALOG)  # i3 floats dialogs
+        self.set_default_size(WIDTH, -1)
+        self.get_style_context().add_class("timur")
+
+        self.data = {}
+        self.day_offset = 0
+        self.tab = "entry"
+        self.selected_task = ""
+        self.entry_type = ""
+        self.entry_status = "DONE"
+        self.editing_id = ""
+        self.editing_task_label = ""
+        self.confirm_delete_id = ""
+        self.matches = []
+        self.busy = False
+        self.pending = None
+        self.syncing = False  # True while render() sets widgets, so their signals don't feed back
+
+        self.build()
+        self.connect("key-press-event", self.on_key)
+        self.connect("notify::is-active", self.on_active_changed)
+        self.connect("delete-event", lambda *a: self.hide() or True)
+
+        self.monitor = Gio.File.new_for_path(str(STATE)).monitor_file(Gio.FileMonitorFlags.NONE, None)
+        self.monitor.connect("changed", lambda *a: self.load_state())
+        GLib.timeout_add_seconds(30, lambda: self.render() or True)  # keeps "Today" and the hints current
+        self.load_state()
+
+    # ---------------------------------------------------------------- layout
+
+    def build(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
+
+        header = Gtk.Box(spacing=8)
+        header.pack_start(label("Timur", "title"), False, False, 0)
+        self.day_picker, self.day_buttons = toggle_group([(-1, "Yesterday"), (0, "Today")], self.set_day)
+        self.day_buttons[0].set_active(True)
+        header.pack_end(self.day_picker, False, False, 0)
+        refresh = Gtk.Button(label="↻", tooltip_text="Refresh")
+        refresh.get_style_context().add_class("flat")
+        refresh.connect("clicked", lambda *a: self.run_cli(["refresh"], None))
+        header.pack_end(refresh, False, False, 0)
+        self.day_total = label("", "dim")
+        header.pack_end(self.day_total, False, False, 0)
+        body.pack_start(header, False, False, 0)
+
+        self.session_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.session_text = label("", wrap=True)
+        self.session_button = Gtk.Button(label="Paste session", halign=Gtk.Align.START)
+        self.session_button.connect("clicked", self.paste_session)
+        self.session_box.pack_start(self.session_text, False, False, 0)
+        self.session_box.pack_start(self.session_button, False, False, 0)
+        body.pack_start(self.session_box, False, False, 0)
+
+        self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        tabs, self.tab_buttons = toggle_group([("entry", "Time entry"), ("journal", "Journal note")], self.set_tab)
+        self.main_box.pack_start(tabs, False, False, 0)
+        self.main_box.pack_start(Gtk.Separator(), False, False, 0)
+        self.entry_tab = self.build_entry_tab()
+        self.journal_tab = self.build_journal_tab()
+        self.main_box.pack_start(self.entry_tab, False, False, 0)
+        self.main_box.pack_start(self.journal_tab, False, False, 0)
+        body.pack_start(self.main_box, False, False, 0)
+
+        self.add(body)
+        body.show_all()
+
+    def build_entry_tab(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        self.edit_banner = label("✎ Editing a logged entry — Save updates it, Esc cancels", "accent", "banner")
+        box.pack_start(self.edit_banner, False, False, 0)
+
+        self.task_label = label("TASK", "section", ellipsize=Pango.EllipsizeMode.MIDDLE)
+        box.pack_start(self.task_label, False, False, 0)
+        self.task_field = Gtk.Entry(placeholder_text="Search tasks…")
+        self.task_field.connect("changed", lambda *a: self.render_tasks())
+        self.task_field.connect("key-press-event", self.on_task_key)
+        box.pack_start(self.task_field, False, False, 0)
+
+        self.task_list = Gtk.ListBox()
+        self.task_list.set_activate_on_single_click(True)
+        self.task_list.connect("row-activated", lambda lb, row: self.pick_task(self.matches[row.get_index()]["id"]))
+        box.pack_start(self.task_list, False, False, 0)
+        self.no_tasks = label("No matching active tasks", "dim")
+        box.pack_start(self.no_tasks, False, False, 0)
+
+        row = Gtk.Box(spacing=16)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        col.pack_start(label("TYPE", "section"), False, False, 0)
+        self.type_combo = Gtk.ComboBoxText()
+        self.type_combo.set_size_request(190, -1)
+        self.type_combo.connect("changed", self.on_type_changed)
+        col.pack_start(self.type_combo, False, False, 0)
+        row.pack_start(col, False, False, 0)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        col.pack_start(label("STATUS", "section"), False, False, 0)
+        status_box, self.status_buttons = toggle_group([(s, s) for s in STATUS_ORDER], self.set_status)
+        self.status_buttons["DONE"].set_active(True)
+        col.pack_start(status_box, False, False, 0)
+        row.pack_start(col, False, False, 0)
+        box.pack_start(row, False, False, 0)
+
+        row = Gtk.Box(spacing=16)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.duration_label = label("DURATION", "section")
+        col.pack_start(self.duration_label, False, False, 0)
+        self.duration_field = Gtk.Entry(placeholder_text="hrs, e.g. 1.5", width_chars=12)
+        self.duration_field.connect("changed", lambda *a: self.render_form())
+        self.duration_field.connect("activate", lambda *a: self.description_field.grab_focus())
+        col.pack_start(self.duration_field, False, False, 0)
+        row.pack_start(col, False, False, 0)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        col.pack_start(label("DESCRIPTION", "section"), False, False, 0)
+        self.description_field = Gtk.Entry(placeholder_text="What did you do?")
+        self.description_field.connect("activate", lambda *a: self.save_entry())
+        col.pack_start(self.description_field, False, False, 0)
+        row.pack_start(col, True, True, 0)
+        box.pack_start(row, False, False, 0)
+
+        row = Gtk.Box(spacing=6)
+        self.entry_message = label("", wrap=True)
+        row.pack_start(self.entry_message, True, True, 0)
+        self.save_button = Gtk.Button(label="Save", valign=Gtk.Align.CENTER)
+        self.save_button.connect("clicked", lambda *a: self.save_entry())
+        row.pack_end(self.save_button, False, False, 0)
+        self.cancel_button = Gtk.Button(label="Cancel", valign=Gtk.Align.CENTER)
+        self.cancel_button.connect("clicked", lambda *a: self.cancel_edit())
+        row.pack_end(self.cancel_button, False, False, 0)
+        box.pack_start(row, False, False, 0)
+
+        box.pack_start(Gtk.Separator(), False, False, 0)
+        row = Gtk.Box()
+        self.logged_label = label("LOGGED TODAY", "section")
+        self.logged_total = label("", "section")
+        row.pack_start(self.logged_label, False, False, 0)
+        row.pack_end(self.logged_total, False, False, 0)
+        box.pack_start(row, False, False, 0)
+
+        self.entries_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        box.pack_start(self.entries_list, False, False, 0)
+        self.nothing_logged = label("Nothing logged yet", "dim")
+        box.pack_start(self.nothing_logged, False, False, 0)
+        return box
+
+    def build_journal_tab(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.journal_add_label = label("ADD TO TODAY'S JOURNAL", "section")
+        box.pack_start(self.journal_add_label, False, False, 0)
+        self.note_field = Gtk.Entry(placeholder_text="What happened?")
+        self.note_field.connect("changed", lambda *a: self.render_journal_hint())
+        self.note_field.connect("activate", lambda *a: self.add_note())
+        box.pack_start(self.note_field, False, False, 0)
+
+        row = Gtk.Box(spacing=6)
+        self.journal_message = label("", "dim", ellipsize=Pango.EllipsizeMode.END)
+        row.pack_start(self.journal_message, True, True, 0)
+        self.add_button = Gtk.Button(label="Add line")
+        self.add_button.connect("clicked", lambda *a: self.add_note())
+        row.pack_end(self.add_button, False, False, 0)
+        box.pack_start(row, False, False, 0)
+
+        box.pack_start(Gtk.Separator(), False, False, 0)
+        self.journal_label = label("TODAY'S JOURNAL", "section")
+        box.pack_start(self.journal_label, False, False, 0)
+        self.journal_view = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroller.set_max_content_height(260)
+        scroller.set_propagate_natural_height(True)
+        scroller.add(self.journal_view)
+        box.pack_start(scroller, False, False, 0)
+        return box
+
+    # ---------------------------------------------------------------- state
+
+    @property
+    def day_iso(self):
+        return iso(dt.date.today() + dt.timedelta(days=self.day_offset))
+
+    @property
+    def day_name(self):
+        return "Today" if self.day_offset == 0 else "Yesterday"
+
+    @property
+    def day(self):
+        return (self.data.get("days") or {}).get(self.day_iso) or {"entries": [], "totalMinutes": 0, "journal": ""}
+
+    @property
+    def has_data(self):
+        return bool(self.data.get("days"))
+
+    @property
+    def needs_session(self):
+        return self.data.get("errorKind") == "auth"
+
+    @property
+    def editing(self):
+        return self.editing_id != ""
+
+    def expiry_days(self):
+        expire = (self.data.get("me") or {}).get("loginExpire")
+        if not expire:
+            return 999
+        try:
+            when = dt.datetime.fromisoformat(expire.replace("Z", "+00:00"))
+        except ValueError:
+            return 999
+        return (when - dt.datetime.now(when.tzinfo)).total_seconds() / 86400
+
+    def task_label_for(self, task_id):
+        for t in self.data.get("tasks") or []:
+            if str(t["id"]) == str(task_id):
+                return t["label"]
+        return ""
+
+    def default_type(self):
+        keys = [t["key"] for t in self.data.get("types") or []]
+        return "DEVELOPMENT" if "DEVELOPMENT" in keys else (keys[0] if keys else "")
+
+    def filter_tasks(self, query):
+        recent = [str(r) for r in self.data.get("recentTaskIds") or []]
+        words = query.lower().split()
+        found = [{"id": str(t["id"]), "label": t["label"], "recent": str(t["id"]) in recent,
+                  "rank": recent.index(str(t["id"])) if str(t["id"]) in recent else 9999}
+                 for t in self.data.get("tasks") or [] if all(w in t["label"].lower() for w in words)]
+        found.sort(key=lambda t: (t["rank"], t["label"].lower()))
+        return found[:MAX_TASK_ROWS]
+
+    def load_state(self):
+        try:
+            self.data = json.loads(STATE.read_text())
+        except (OSError, ValueError):
+            return
+        if not self.entry_type:
+            self.entry_type = self.default_type()
+        self.render()
+
+    # ---------------------------------------------------------------- render
+
+    def render(self):
+        self.syncing = True
+        day = self.day
+        self.day_total.set_text(f"{self.day_name} {format_minutes(day['totalMinutes'])}" if self.has_data else "")
+
+        expiring = not self.needs_session and self.expiry_days() < EXPIRY_WARN_DAYS
+        self.session_box.set_visible(self.needs_session or not self.has_data or expiring)
+        if self.needs_session or not self.has_data:
+            self.session_text.set_text((self.data.get("error") or "Not connected.") +
+                                       "\nCopy the __Secure-timur-PROD-sessionid and timur-PROD-csrftoken cookies "
+                                       "from the Timur web app (F12 → Application → Cookies).")
+            set_classes(self.session_text, "urgent" if self.needs_session else "")
+            self.session_button.set_label("Paste session")
+        else:
+            self.session_text.set_text(f"⚠ Timur session expires in {max(0, int(self.expiry_days()))} day(s) — paste a new one soon.")
+            set_classes(self.session_text)
+            self.session_button.set_label("Update session")
+
+        self.main_box.set_visible(self.has_data)
+        self.entry_tab.set_visible(self.tab == "entry")
+        self.journal_tab.set_visible(self.tab == "journal")
+
+        types = [(t["key"], t["label"]) for t in self.data.get("types") or []]
+        if types != getattr(self, "_types", None):
+            self._types = types
+            self.type_combo.remove_all()
+            for key, text in types:
+                self.type_combo.append(key, text)
+        self.type_combo.set_active_id(self.entry_type or None)
+        self.status_buttons.get(self.entry_status, self.status_buttons["DONE"]).set_active(True)
+        self.day_buttons[self.day_offset].set_active(True)
+        self.tab_buttons[self.tab].set_active(True)
+        self.syncing = False
+
+        self.render_tasks()
+        self.render_form()
+        self.render_entries()
+        self.render_journal()
+
+    def render_tasks(self):
+        self.matches = self.filter_tasks(self.task_field.get_text())
+        for child in self.task_list.get_children():
+            self.task_list.remove(child)
+        for t in self.matches:
+            row = Gtk.Box(spacing=8)
+            chosen = t["id"] == self.selected_task
+            row.pack_start(label(("▸ " if chosen else "  ") + t["label"], "accent" if chosen else "",
+                                 ellipsize=Pango.EllipsizeMode.MIDDLE), True, True, 0)
+            row.pack_end(label("recent" if t["recent"] else "", "dim"), False, False, 0)
+            self.task_list.add(row)
+        self.task_list.show_all()
+        if self.matches:
+            self.task_list.select_row(self.task_list.get_row_at_index(0))
+        self.no_tasks.set_visible(not self.matches)
+
+    def render_form(self):
+        selected = self.task_label_for(self.selected_task) or (self.editing_task_label if self.editing else "")
+        self.task_label.set_text("TASK" + (f"   ·   {selected}" if selected else ""))
+        self.edit_banner.set_visible(self.editing)
+        self.cancel_button.set_visible(self.editing)
+
+        text = self.duration_field.get_text().strip()
+        minutes = parse_duration(text)
+        self.duration_label.set_text("DURATION" + (("  = " + format_minutes(minutes)) if minutes else "  ?") if text else "DURATION")
+        set_classes(self.duration_label, "urgent" if text and not minutes else "")
+        self.save_button.set_label("Saving…" if self.busy else ("Update" if self.editing else "Save"))
+        self.save_button.set_sensitive(not self.busy and bool(self.selected_task) and bool(self.entry_type) and minutes > 0)
+
+    def render_entries(self):
+        day = self.day
+        self.logged_label.set_text(f"LOGGED {self.day_name.upper()}")
+        self.logged_total.set_text(format_minutes(day["totalMinutes"]))
+        for child in self.entries_list.get_children():
+            self.entries_list.remove(child)
+        for entry in day.get("entries") or []:
+            cid = entry.get("clientId") or ""
+            confirming = cid and cid == self.confirm_delete_id
+            editing = self.editing and cid == self.editing_id
+            box = Gtk.Box(spacing=12)
+            box.pack_start(label(format_minutes(entry.get("duration")), "dim", xalign=1.0, chars=6), False, False, 0)
+            box.pack_start(label(entry.get("task") or "?", "accent" if editing else "",
+                                 ellipsize=Pango.EllipsizeMode.MIDDLE, chars=20), False, False, 0)
+            box.pack_start(label("Delete this entry?" if confirming else (entry.get("description") or ""),
+                                 "urgent" if confirming else "dim", ellipsize=Pango.EllipsizeMode.END), True, True, 0)
+            if cid and not self.busy:
+                actions = [("Yes, delete", lambda *a, e=entry: self.delete_entry(e), "urgent"),
+                           ("Keep", lambda *a: self.set_confirm(""), "")] if confirming else \
+                          [("Edit", lambda *a, e=entry: self.start_edit(e), ""),
+                           ("Delete", lambda *a, c=cid: self.set_confirm(c), "urgent")]
+                for text, handler, cls in reversed(actions):  # pack_end fills right to left
+                    button = Gtk.Button()
+                    button.add(label(text, cls))
+                    button.get_style_context().add_class("flat")
+                    button.connect("clicked", handler)
+                    box.pack_end(button, False, False, 0)
+            row = Gtk.ListBoxRow()
+            row.add(box)
+            if confirming or editing:
+                row.get_style_context().add_class("confirming" if confirming else "editing")
+            self.entries_list.add(row)
+        self.entries_list.show_all()
+        self.nothing_logged.set_visible(not day.get("entries"))
+
+    def render_journal(self):
+        possessive = f"{self.day_name.upper()}'S"
+        self.journal_add_label.set_text(f"ADD TO {possessive} JOURNAL")
+        self.journal_label.set_text(f"{possessive} JOURNAL")
+        journal = self.day.get("journal") or ""
+        buffer = self.journal_view.get_buffer()
+        if buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False) != (journal or "Empty"):
+            buffer.set_text(journal or "Empty")
+            GLib.idle_add(lambda: self.journal_view.scroll_to_iter(buffer.get_end_iter(), 0, False, 0, 0) and False)
+        set_classes(self.journal_view, "" if journal else "dim")
+        self.render_journal_hint()
+
+    def render_journal_hint(self, message=None, kind=""):
+        text = self.note_field.get_text().strip()
+        if message is None:
+            message = f"Will be added as:  - {dt.datetime.now():%H:%M} {text}" if text else ""
+            kind = "dim"
+        self.journal_message.set_text(message)
+        set_classes(self.journal_message, {"ok": "accent", "error": "urgent", "auth": "urgent"}.get(kind, kind))
+        self.add_button.set_label("Saving…" if self.busy else "Add line")
+        self.add_button.set_sensitive(not self.busy and bool(text))
+
+    def show_message(self, text, kind=""):
+        if self.tab == "journal":
+            self.render_journal_hint(text, kind)
+            return
+        self.entry_message.set_text(text)
+        set_classes(self.entry_message, {"ok": "accent", "error": "urgent", "auth": "urgent"}.get(kind, ""))
+
+    # ---------------------------------------------------------------- handlers
+
+    def set_day(self, offset):
+        if self.syncing or offset == self.day_offset:
+            return
+        self.day_offset = offset
+        self.cancel_edit()
+        self.confirm_delete_id = ""
+        self.render()
+
+    def set_tab(self, tab):
+        if self.syncing:
+            return
+        self.tab = tab
+        self.render()
+        self.focus_tab()
+
+    def set_status(self, status):
+        if not self.syncing:
+            self.entry_status = status
+
+    def set_confirm(self, client_id):
+        self.confirm_delete_id = client_id
+        self.render_entries()
+
+    def on_type_changed(self, combo):
+        if not self.syncing and combo.get_active_id():
+            self.entry_type = combo.get_active_id()
+            self.render_form()
+
+    def focus_tab(self):
+        (self.task_field if self.tab == "entry" else self.note_field).grab_focus()
+
+    def pick_task(self, task_id):
+        self.selected_task = task_id
+        last = (self.data.get("lastTypeByTask") or {}).get(task_id)
+        self.entry_type = last or self.entry_type or self.default_type()
+        self.render()
+        self.duration_field.grab_focus()
+
+    def on_task_key(self, widget, event):
+        rows = len(self.matches)
+        current = self.task_list.get_selected_row()
+        index = current.get_index() if current else 0
+        if event.keyval == Gdk.KEY_Down and rows:
+            self.task_list.select_row(self.task_list.get_row_at_index(min(index + 1, rows - 1)))
+            return True
+        if event.keyval == Gdk.KEY_Up and rows:
+            self.task_list.select_row(self.task_list.get_row_at_index(max(index - 1, 0)))
+            return True
+        if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not event.state & Gdk.ModifierType.CONTROL_MASK:
+            if rows:
+                self.pick_task(self.matches[index]["id"])
+            return True
+        return False
+
+    def on_key(self, widget, event):
+        if event.keyval == Gdk.KEY_Escape:
+            if self.confirm_delete_id:
+                self.set_confirm("")
+            elif self.editing:
+                self.cancel_edit()
+            else:
+                self.hide()
+            return True
+        if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and event.state & Gdk.ModifierType.CONTROL_MASK:
+            self.save_entry() if self.tab == "entry" else self.add_note()
+            return True
+        return False
+
+    def on_active_changed(self, *args):
+        # Close when focus moves elsewhere, like a popup. The delay lets the Type dropdown open without closing us.
+        if not self.is_active():
+            GLib.timeout_add(200, self.hide_if_inactive)
+
+    def hide_if_inactive(self):
+        if not self.is_active() and not self.type_combo.props.popup_shown and self.get_visible():
+            self.hide()
+        return False
+
+    # ---------------------------------------------------------------- actions
+
+    def save_entry(self):
+        minutes = parse_duration(self.duration_field.get_text())
+        if not self.selected_task:
+            return self.show_message("Pick a task first", "error")
+        if not minutes:
+            return self.show_message("Enter a duration in hours, like 1, 1.5 or 0.25 (or 45m)", "error")
+        if self.busy or not self.entry_type:
+            return
+        fields = {"date": self.day_iso, "task": self.selected_task, "type": self.entry_type,
+                  "status": self.entry_status, "duration": minutes,
+                  "description": self.description_field.get_text().strip()}
+        if self.editing:
+            fields["clientId"] = self.editing_id
+            self.run_cli(["update-entry", json.dumps(fields)], "update")
+        else:
+            self.run_cli(["add-entry", json.dumps(fields)], "entry")
+
+    def start_edit(self, entry):
+        self.confirm_delete_id = ""
+        self.editing_id = entry.get("clientId") or ""
+        self.editing_task_label = entry.get("task") or ""
+        self.selected_task = str(entry.get("taskId") or "")
+        self.entry_type = entry.get("type") or self.default_type()
+        self.entry_status = entry.get("status") or "DONE"
+        self.duration_field.set_text(format_minutes(entry["duration"]) if entry.get("duration") else "")
+        self.description_field.set_text(entry.get("description") or "")
+        self.task_field.set_text("")
+        self.show_message("")
+        self.render()
+        self.description_field.grab_focus()
+
+    def cancel_edit(self):
+        if not self.editing:
+            return
+        self.editing_id = self.editing_task_label = self.selected_task = ""
+        self.entry_status = "DONE"
+        self.duration_field.set_text("")
+        self.description_field.set_text("")
+        self.show_message("")
+        self.render()
+
+    def delete_entry(self, entry):
+        self.confirm_delete_id = ""
+        if self.editing_id == entry.get("clientId"):
+            self.cancel_edit()
+        summary = f"{format_minutes(entry.get('duration'))} · {entry.get('task')}"
+        self.run_cli(["delete-entry", entry["clientId"], self.day_iso], "delete", summary)
+
+    def add_note(self):
+        text = self.note_field.get_text().strip()
+        if not self.busy and text:
+            self.run_cli(["add-note", self.day_iso, text], "note")
+
+    def paste_session(self, *args):
+        subprocess.Popen([CLI, "set-session", "--window"], start_new_session=True)
+        self.hide()
+
+    def run_cli(self, args, action, summary=""):
+        """Run timur-bar off the UI thread. action None = background refresh (errors show in the header)."""
+        if self.pending is not None:
+            return
+        self.pending = (action, summary)
+        if action:
+            self.busy = True
+            self.show_message("Saving…")
+            self.render()
+
+        def work():
+            result = subprocess.run([CLI, *args], capture_output=True, text=True)
+            try:
+                parsed = json.loads(result.stdout.strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                parsed = {"ok": False, "error": (result.stderr or "Unexpected output from timur-bar").strip()}
+            GLib.idle_add(self.finish_cli, parsed)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def finish_cli(self, result):
+        action, summary = self.pending
+        self.pending = None
+        self.busy = False
+        self.load_state()
+        if action is None:
+            return False
+        if not result.get("ok"):
+            prefix = "Not saved — " if result.get("errorKind") == "network" else ""
+            self.show_message(f"{prefix}{result.get('error') or 'Save failed'}. Your input is kept.",
+                              "auth" if result.get("errorKind") == "auth" else "error")
+            self.render()
+            return False
+        task = self.task_label_for(self.selected_task) or self.editing_task_label
+        minutes = format_minutes(parse_duration(self.duration_field.get_text()))
+        if action in ("entry", "update"):
+            text = f"Logged {minutes} to {task}" if action == "entry" else f"Updated {minutes} · {task}"
+            notify(text, "appointment-new" if action == "entry" else "document-edit")
+            self.editing_id = self.editing_task_label = ""
+            self.duration_field.set_text("")
+            self.description_field.set_text("")
+            self.task_field.set_text("")
+            self.show_message("✓ " + text, "ok")
+            self.task_field.grab_focus()
+        elif action == "delete":
+            notify(f"Deleted {summary}", "edit-delete")
+            self.show_message(f"✓ Deleted {summary}", "ok")
+        elif action == "note":
+            self.note_field.set_text("")
+            self.render_journal_hint(f"✓ Added to {self.day_name.lower()}'s journal", "ok")
+            self.note_field.grab_focus()
+        self.render()
+        return False
+
+    # ---------------------------------------------------------------- show / hide
+
+    def present_at_top_right(self):
+        display = Gdk.Display.get_default()
+        _, x, y = display.get_default_seat().get_pointer().get_position()
+        geo = display.get_monitor_at_point(x, y).get_geometry()
+        self.move(geo.x + geo.width - WIDTH - 8, geo.y + TOP_OFFSET)
+        self.show()
+        self.present_with_time(Gdk.CURRENT_TIME)
+        self.move(geo.x + geo.width - WIDTH - 8, geo.y + TOP_OFFSET)  # again after map: some WMs ignore the first
+        self.show_message("")
+        self.render()
+        self.focus_tab()
+        self.run_cli(["refresh"], None)
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="com.togglecorp.TimurPanel",
+                         flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.window = None
+
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider,
+                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    def do_command_line(self, command_line):
+        args = command_line.get_arguments()[1:]
+        tab = "journal" if "journal" in args else "entry"
+        first = self.window is None
+        if first:
+            self.window = Panel(self)
+            if "--yesterday" in args:
+                self.window.set_day(-1)
+        win = self.window
+        if not first and win.get_visible() and win.tab == tab:
+            win.hide()  # same shortcut again closes it
+            return 0
+        if win.tab != tab:
+            win.set_tab(tab)
+        if not win.get_visible():
+            win.present_at_top_right()
+        else:
+            win.present_with_time(Gdk.CURRENT_TIME)
+            win.focus_tab()
+        return 0
+
+
+if __name__ == "__main__":
+    GLib.set_prgname("timur-panel")  # X11 class "Timur-panel", used by the i3 for_window rule
+    sys.exit(App().run(sys.argv))

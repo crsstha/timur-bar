@@ -3,7 +3,7 @@
 Log time and journal notes to [Timur](https://timur.dev.togglecorp.com/) (Togglecorp's timesheet) from your desktop bar, without opening the web app.
 
 - **Omarchy:** a bar plugin with a panel: task search, hours, description, today's entries with **Edit / Delete**, and the journal.
-- **i3:** a polybar or i3blocks module plus **rofi** menus for the same actions.
+- **i3:** a polybar or i3blocks module that opens the same panel as a GTK popup in the top-right corner, plus **rofi** menus as a fallback.
 
 ```
  󰔟 5h20      logged today
@@ -18,7 +18,7 @@ Log time and journal notes to [Timur](https://timur.dev.togglecorp.com/) (Toggle
 bin/timur-bar  ── the only part that talks to Timur (GraphQL + your session cookie)
    │  refresh every 5 min (systemd user timer) → ~/.cache/timur-bar/state.json
    ▼
-Omarchy: Panel.qml / BarWidget.qml      i3: timur-bar bar  +  i3/timur-menu (rofi)
+Omarchy: Panel.qml / BarWidget.qml      i3: timur-bar bar  +  i3/timur-panel (GTK)  +  i3/timur-menu (rofi)
 ```
 
 Both front ends read the same cached state and call the same script to save, so they behave the same.
@@ -27,7 +27,7 @@ Both front ends read the same cached state and call the same script to save, so 
 
 - Python 3 (standard library only), systemd user session, `notify-send`
 - **Omarchy:** nothing else
-- **i3:** `rofi`, a notification daemon (`dunst`), and `polybar` or `i3blocks`
+- **i3:** `python-gobject` + `gtk3` (panel), `rofi` (menus), a notification daemon (`dunst`), and `polybar` or `i3blocks`
 - A Timur account you can log into in the browser
 
 ## Install on Omarchy
@@ -66,12 +66,12 @@ It:
 
 ## Install on i3 (Arch Linux)
 
-On i3 the bar module opens **rofi menus** for the same actions. The Omarchy panel (`Panel.qml`) needs Omarchy's Quickshell shell and does not run on i3.
+On i3, clicking the bar module opens `timur-panel`: the same panel as on Omarchy (task search, type, status, duration, description, today's entries with **Edit / Delete**, the journal, Yesterday / Today), drawn with GTK3 and placed under the bar in the top-right corner. `Panel.qml` itself needs Omarchy's Quickshell shell, so i3 gets this copy. The rofi menus (`timur-menu`) are still there, on scroll-up.
 
 **1. Install the dependencies:**
 
 ```bash
-sudo pacman -S --needed git python rofi dunst libnotify xdg-utils alacritty ttf-nerd-fonts-symbols
+sudo pacman -S --needed git python python-gobject gtk3 rofi dunst libnotify xdg-utils alacritty ttf-nerd-fonts-symbols
 sudo pacman -S --needed polybar      # or: i3blocks
 ```
 
@@ -86,9 +86,12 @@ cd ~/Projects/timur-bar
 ```
 
 It:
-- links `timur-bar`, `timur-menu` and `i3blocks-timur` into `~/.local/bin`;
+- links `timur-bar`, `timur-panel`, `timur-menu` and `i3blocks-timur` into `~/.local/bin`;
 - starts the refresh timer;
-- appends a marked block to `~/.config/i3/config`, with the keybindings (`Super+Alt+t/j/e`, written as `Mod4+Mod1` so they work whether `$mod` is Super or Alt) and an `import-environment` line so the timers can send notifications.
+- appends a marked block to `~/.config/i3/config` with:
+  - the keybindings `Super+Alt+t/j/e`, written as `Mod4+Mod1` so they work whether `$mod` is Super or Alt;
+  - a `for_window` rule that floats the panel without a border;
+  - an `import-environment` line so the timers can send notifications.
 
 **3. Make sure notifications work.** If `dunst` isn't started anywhere yet, add this to `~/.config/i3/config`:
 
@@ -136,8 +139,9 @@ exec --no-startup-id dunst
 
 **7. Check it works:**
 - `timur-bar bar` prints e.g. `󰔟 0m`.
-- The bar shows the same text, and left-clicking it opens the rofi menu.
-- `Super+Alt+t` asks for a task.
+- The bar shows the same text, and left-clicking it opens the panel in the top-right corner. Click again, press `Esc` or click elsewhere to close it.
+- If the panel covers your bar or sits too low, set `export TIMUR_PANEL_OFFSET=<bar height in px>` (default `30`) in `~/.profile`.
+- `Super+Alt+t` opens the panel with the cursor in the task search.
 
 ## Connect your session
 
@@ -170,12 +174,14 @@ omarchy restart shell                    # Omarchy only, to reload the panel
 
 | | Omarchy | i3 |
 |---|---|---|
-| Log time | `Super+Alt+T` or left-click | `Super+Alt+t`, scroll up on the module, or left-click → *Log time* |
+| Open the panel | `Super+Alt+T` or left-click | `Super+Alt+t` or left-click |
 | Journal note | `Super+Alt+J` | `Super+Alt+j` |
-| Edit / delete entries | hover an entry in *Logged today* | `Super+Alt+e` or menu → *Entries* |
+| Save from any field | `Ctrl+Enter` | `Ctrl+Enter` |
+| Edit / delete entries | hover an entry in *Logged today* | *Edit* / *Delete* on an entry in *Logged today* (`Super+Alt+e` opens the panel) |
 | Refresh | middle-click | middle-click |
 | Open Timur in the browser | right-click | right-click |
-| Yesterday | *Yesterday* button | menu → *Switch to yesterday* |
+| Yesterday | *Yesterday* button | *Yesterday* button |
+| rofi menus | — | scroll up on the module, or `timur-menu` |
 
 **Duration is in hours:**
 
@@ -216,6 +222,8 @@ tail -n 5 ~/.cache/timur-bar/log | jq .   # every save attempt and its result
 | Omarchy panel shows old behaviour after editing | `omarchy restart shell` |
 | i3: `Duplicate keybinding` for `timur-menu` on reload | Old block using `$mod+Mod1`, which is plain Alt when `$mod` is Alt. Replace it with the current `i3/i3.config` block (see [Update](#update)) |
 | i3: no notifications from timers | Make sure the `import-environment` line from `i3/i3.config` is in your i3 config, and that `dunst` is running |
+| i3: clicking the module doesn't open the panel | Run `timur-panel` in a terminal to see the error. `ValueError: Namespace Gtk not available` means `python-gobject` / `gtk3` are missing |
+| i3: panel opens tiled instead of floating | The `for_window [class="^Timur-panel$"]` line from `i3/i3.config` is missing from your i3 config |
 | i3: module shows nothing / clicks do nothing | Run `~/.local/bin/i3blocks-timur` or `timur-bar bar` in a terminal to see the error. Check the paths in your bar config |
 | i3: icon shows as a box | Install `ttf-nerd-fonts-symbols` and add it as a polybar font, or set `TIMUR_BAR_ICON` |
 
