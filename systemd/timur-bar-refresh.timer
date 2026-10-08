@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Timur time entries every 5 minutes
+
+[Timer]
+OnStartupSec=15s
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

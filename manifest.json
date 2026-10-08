@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "crsstha.timur",
+  "name": "Timur",
+  "version": "1.0.0",
+  "author": "crsstha",
+  "description": "Today's logged time from Timur, with quick time-entry and journal-note forms. Data comes from bin/timur-bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Timur",
+    "description": "Logged-time pill with time entry and journal popup",
+    "category": "Info",
+    "allowMultiple": false
+  }
+}

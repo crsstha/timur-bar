@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh Timur time entries for the bar
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/timur-bar refresh

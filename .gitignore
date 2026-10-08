@@ -1,0 +1,10 @@
+# Never commit secrets or generated data
+session
+urls
+*.bak
+*.bak.*
+.*.bak
+__pycache__/
+*.pyc
+state.json
+log

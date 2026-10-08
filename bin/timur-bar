@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+"""Timur (timesheet) from the desktop bar — shared core for the Omarchy
+plugin (crsstha.timur) and the i3 front end (polybar / i3blocks + rofi).
+
+  timur-bar refresh [--date YYYY-MM-DD]   Fetch entries, tasks, journal -> state.json
+  timur-bar add-entry '<json>'            Create a time entry, then refresh
+  timur-bar update-entry '<json>'         Change an entry (matched by clientId), then refresh
+  timur-bar delete-entry <clientId> [date]  Delete an entry, then refresh
+  timur-bar add-note <date> <text>        Append "- HH:MM text" to that day's journal
+  timur-bar set-session                   Prompt for the sessionid/csrftoken cookies
+  timur-bar set-session --window          Same, in a new terminal window
+  timur-bar bar [--polybar|--i3blocks]    Print the bar text from the cached state (no network)
+
+The session is read from ~/.config/timur-bar/session (key=value lines).
+Commands print one JSON object on stdout: {"ok": true, ...} or {"ok": false, "error": ...}.
+"""
+
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+API = "https://api.timur.dev.togglecorp.com/graphql/"
+ORIGIN = "https://timur.dev.togglecorp.com"
+SESSION = Path.home() / ".config/timur-bar/session"
+# Cookie names from timur-backend main/settings.py: timur-{ENV}-…, and the
+# session cookie gains a "__Secure-" prefix when served over HTTPS.
+COOKIE_PREFIX = "timur-PROD-"
+COOKIE_NAMES = {"sessionid": "__Secure-timur-PROD-sessionid", "csrftoken": "timur-PROD-csrftoken"}
+CACHE = Path.home() / ".cache/timur-bar"
+STATE = CACHE / "state.json"
+RECENT_DAYS = 7
+
+
+# Bar text (i3 front end). The Omarchy panel computes the same in Panel.qml.
+BAR_ICON = os.environ.get("TIMUR_BAR_ICON", "󰔟")
+NUDGE_HOUR, NUDGE_MINUTES, EXPIRY_WARN_DAYS = 17, 120, 3
+COLOR_URGENT, COLOR_DIM = os.environ.get("TIMUR_BAR_URGENT", "#e06c75"), os.environ.get("TIMUR_BAR_DIM", "#7f848e")
+
+
+class TimurError(Exception):
+    def __init__(self, message, kind="error"):
+        super().__init__(message)
+        self.kind = kind  # "error" | "network" | "auth"
+
+
+# ---------------------------------------------------------------- session
+
+def read_session():
+    cookies = {}
+    try:
+        for line in SESSION.read_text().splitlines():
+            if "=" in line and not line.strip().startswith("#"):
+                key, value = line.split("=", 1)
+                key = key.strip().removeprefix("__Secure-").removeprefix(COOKIE_PREFIX)
+                cookies[key] = value.strip()
+    except OSError:
+        pass
+    return cookies
+
+
+def set_session():
+    print("Timur session setup\n")
+    print("In the Timur web app press F12 → Application → Cookies →")
+    print("https://timur.dev.togglecorp.com (or api.timur…), and copy the Value of:\n")
+    session_id = input(f"  {COOKIE_NAMES['sessionid']}: ").strip()
+    csrf = input(f"  {COOKIE_NAMES['csrftoken']}: ").strip()
+    if not session_id:
+        print("\nNo sessionid given — nothing saved.")
+        return 1
+    SESSION.parent.mkdir(parents=True, exist_ok=True)
+    SESSION.write_text(f"sessionid={session_id}\n" + (f"csrftoken={csrf}\n" if csrf else ""))
+    os.chmod(SESSION, 0o600)
+    print("\nSaved. Checking it works…")
+    result = refresh(None)
+    if result.get("ok"):
+        print(f"Connected as {result['state']['me'].get('displayName') or 'you'}.")
+        return 0
+    print(f"That didn't work: {result.get('error')}")
+    return 1
+
+
+# ---------------------------------------------------------------- graphql
+
+def gql(query, variables=None):
+    cookies = read_session()
+    if not cookies.get("sessionid"):
+        raise TimurError("Not connected — paste your Timur session", "auth")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Origin": ORIGIN,
+        "Referer": ORIGIN + "/",
+        "User-Agent": "timur-bar",
+        "Cookie": "; ".join(f"{COOKIE_NAMES.get(k, k)}={v}" for k, v in cookies.items()),
+    }
+    if cookies.get("csrftoken"):
+        headers["X-CSRFToken"] = cookies["csrftoken"]
+    body = json.dumps({"query": query, "variables": variables or {}}).encode()
+    req = urllib.request.Request(API, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise TimurError("Timur session expired or rejected (HTTP %d)" % e.code, "auth")
+        raise TimurError(f"Timur returned HTTP {e.code}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise TimurError(f"Network error: {getattr(e, 'reason', e)}", "network")
+    if data.get("errors"):
+        message = "; ".join(err.get("message", "?") for err in data["errors"])
+        kind = "auth" if any(w in message.lower() for w in ("auth", "login", "permission", "anonymous")) else "error"
+        raise TimurError(message, kind)
+    return data.get("data") or {}
+
+
+ME = """query Me { public { id me { id displayName email loginExpire } } }"""
+
+ENUMS_AND_TASKS = """query Enums {
+  enums { TimeEntryStatus { key label } TimeEntryType { key label } }
+  private { id allActiveTasks { id name contract { id name project { id name shortName } } } }
+}"""
+
+ENTRIES = """query MyTimeEntries($date: Date!) {
+  private { id myTimeEntries(date: $date) {
+    id clientId date description duration startTime status taskId type
+    task { id name contract { id name project { id name shortName } } }
+  } }
+}"""
+
+NOTE = """query Note($date: Date!) { private { id journal(date: $date) { id date journalText } } }"""
+
+UPDATE_NOTE = """mutation UpdateNote($journalText: String!, $date: Date!) {
+  private { updateJournal(data: { journalText: $journalText }, date: $date) {
+    result { id date journalText }
+  } }
+}"""
+
+# Timur matches updateItems and deleteIds by clientId (timur-backend
+# utils/strawberry/mutations.py handle_cud_mutation), limited to your entries.
+CUD_ENTRY = """mutation CudTimeEntry(
+  $createItems: [TimeEntryBulkCreateInput!],
+  $updateItems: [TimeEntryBulkUpdateInput!],
+  $deleteIds: [ID!]
+) {
+  private { cudTimeEntry(createItems: $createItems, updateItems: $updateItems, deleteIds: $deleteIds) {
+    errors
+    deleted { id clientId }
+    createItems { id clientId date description duration status taskId type }
+    updateItems { id clientId date description duration status taskId type }
+  } }
+}"""
+
+
+# ---------------------------------------------------------------- helpers
+
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=1))
+    tmp.replace(path)
+
+
+def read_json(path, fallback):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return fallback
+
+
+def task_label(task):
+    if not task:
+        return ""
+    contract = task.get("contract") or {}
+    project = contract.get("project") or {}
+    return " › ".join(p for p in (project.get("shortName") or project.get("name"),
+                                   contract.get("name"), task.get("name")) if p)
+
+
+def entries_for(date):
+    data = gql(ENTRIES, {"date": date})
+    return (data.get("private") or {}).get("myTimeEntries") or []
+
+
+def journal_for(date):
+    data = gql(NOTE, {"date": date})
+    journal = (data.get("private") or {}).get("journal") or {}
+    return journal.get("journalText") or ""
+
+
+# ---------------------------------------------------------------- commands
+
+def refresh(date):
+    today = dt.date.today()
+    date = date or today.isoformat()
+    previous = read_json(STATE, {})
+    try:
+        me = ((gql(ME).get("public") or {}).get("me"))
+        if not me:
+            raise TimurError("Timur session expired — paste a new one", "auth")
+        meta = gql(ENUMS_AND_TASKS)
+        tasks = [{"id": t["id"], "label": task_label(t)}
+                 for t in (meta.get("private") or {}).get("allActiveTasks") or []]
+
+        # Recent tasks (most recent first) and each task's last-used type.
+        days = [(today - dt.timedelta(days=o)).isoformat() for o in range(RECENT_DAYS + 1)]
+        by_day = {day: entries_for(day) for day in dict.fromkeys(days + [date])}
+        recent, last_type = [], {}
+        for day in days:  # newest day first
+            for e in sorted(by_day[day], key=lambda e: int(e.get("id") or 0), reverse=True):
+                tid = str(e.get("taskId") or "")
+                if tid and tid not in recent:
+                    recent.append(tid)
+                if tid and tid not in last_type and e.get("type"):
+                    last_type[tid] = e["type"]
+
+        def day_view(day):
+            entries = [{
+                "id": e.get("id"),
+                "clientId": e.get("clientId") or "",
+                "taskId": str(e.get("taskId") or ""),
+                "task": task_label(e.get("task")),
+                "description": e.get("description") or "",
+                "duration": e.get("duration") or 0,
+                "status": e.get("status"),
+                "type": e.get("type"),
+            } for e in by_day[day]]
+            return {"entries": entries, "totalMinutes": sum(e["duration"] for e in entries),
+                    "journal": journal_for(day)}
+
+        # The panel can show today or yesterday; keep both fresh.
+        days_state = {day: day_view(day) for day in dict.fromkeys([today.isoformat(), days[1], date])}
+
+        state = {
+            "ok": True,
+            "error": "",
+            "errorKind": "",
+            "updated": dt.datetime.now().astimezone().isoformat(),
+            "today": today.isoformat(),
+            "me": {"displayName": me.get("displayName"), "loginExpire": me.get("loginExpire")},
+            "types": (meta.get("enums") or {}).get("TimeEntryType") or [],
+            "statuses": (meta.get("enums") or {}).get("TimeEntryStatus") or [],
+            "tasks": tasks,
+            "recentTaskIds": recent,
+            "lastTypeByTask": last_type,
+            "days": days_state,
+        }
+        write_json(STATE, state)
+        return {"ok": True, "state": state}
+    except TimurError as e:
+        # Keep the last good data, flag the problem.
+        state = {**previous, "ok": False, "error": str(e), "errorKind": e.kind}
+        write_json(STATE, state)
+        return {"ok": False, "error": str(e), "errorKind": e.kind}
+
+
+def new_ulid():
+    """26-char ULID — Timur's TimeEntry.client_id column is max_length=26."""
+    alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32
+    value = (int(dt.datetime.now().timestamp() * 1000) << 80) | int.from_bytes(os.urandom(10), "big")
+    return "".join(alphabet[(value >> shift) & 31] for shift in range(125, -1, -5))
+
+
+def add_entry(payload):
+    item = json.loads(payload)
+    entry = {
+        "clientId": new_ulid(),
+        "date": item.get("date") or dt.date.today().isoformat(),
+        "task": str(item["task"]),
+        "type": item["type"],
+        "status": item.get("status") or "DONE",
+        "description": item.get("description") or "",
+        "duration": int(item["duration"]) if item.get("duration") not in (None, "") else None,
+    }
+    created = cud({"createItems": [entry]}, "createItems")
+    if not created:
+        raise TimurError("Timur did not confirm the entry was saved")
+    refresh(entry["date"])
+    return {"ok": True, "entry": created[0]}
+
+
+def cud(variables, key):
+    data = gql(CUD_ENTRY, variables)
+    result = (data.get("private") or {}).get("cudTimeEntry") or {}
+    if result.get("errors"):
+        raise TimurError(f"Timur rejected the change: {json.dumps(result['errors'])}")
+    return result.get(key) or []
+
+
+def update_entry(payload):
+    item = json.loads(payload)
+    if not item.get("clientId"):
+        raise TimurError("This entry has no clientId, so it can't be edited here — use the web app")
+    entry = {"clientId": item["clientId"]}
+    for field in ("task", "type", "status", "description"):
+        if field in item:
+            entry[field] = str(item[field]) if field == "task" else item[field]
+    if item.get("duration") not in (None, ""):
+        entry["duration"] = int(item["duration"])
+    if not cud({"updateItems": [entry]}, "updateItems"):
+        raise TimurError("Timur did not confirm the change — the entry may have been deleted")
+    refresh(item.get("date"))
+    return {"ok": True}
+
+
+def delete_entry(client_id, date=None):
+    if not client_id:
+        raise TimurError("This entry has no clientId, so it can't be deleted here — use the web app")
+    if not cud({"deleteIds": [client_id]}, "deleted"):
+        raise TimurError("Timur did not confirm the delete — the entry may already be gone")
+    refresh(date)
+    return {"ok": True}
+
+
+def add_note(date, text):
+    text = " ".join(text.split())
+    if not text:
+        raise TimurError("Nothing to add")
+    current = journal_for(date)  # re-read right before writing
+    line = f"- {dt.datetime.now().strftime('%H:%M')} {text}"
+    new_text = (current.rstrip("\n") + "\n" + line) if current.strip() else line
+    data = gql(UPDATE_NOTE, {"journalText": new_text, "date": date})
+    result = (((data.get("private") or {}).get("updateJournal") or {}).get("result")) or {}
+    if result.get("journalText") is None:
+        raise TimurError("Timur did not confirm the journal was saved")
+    refresh(date)
+    return {"ok": True, "line": line}
+
+
+def terminal_command(title, shell_command):
+    """Run shell_command in a new terminal window, whichever terminal is installed."""
+    import shutil
+    if shutil.which("xdg-terminal-exec"):
+        return ["xdg-terminal-exec", f"--title={title}", "sh", "-c", shell_command]
+    for term in (os.environ.get("TERMINAL"), "alacritty", "kitty", "foot", "wezterm", "gnome-terminal", "xterm"):
+        if term and shutil.which(term):
+            if term == "gnome-terminal":
+                return [term, "--title", title, "--", "sh", "-c", shell_command]
+            if term == "wezterm":
+                return [term, "start", "--", "sh", "-c", shell_command]
+            return [term, "-T" if term in ("xterm", "foot") else "--title", title, "-e", "sh", "-c", shell_command]
+    raise TimurError("No terminal emulator found — run `timur-bar set-session` in a terminal")
+
+
+def format_minutes(minutes):
+    minutes = round(minutes or 0)
+    hours, rest = divmod(minutes, 60)
+    if hours == 0:
+        return f"{rest}m"
+    return f"{hours}h" + (f"{rest:02d}" if rest else "")
+
+
+def bar_text(style):
+    """Pill text for polybar/i3blocks; mirrors the label logic in Panel.qml."""
+    state = read_json(STATE, {})
+    now = dt.datetime.now().astimezone()
+    today = (state.get("days") or {}).get(now.date().isoformat())
+    if state.get("errorKind") == "auth" or not state.get("days"):
+        text, color = f"{BAR_ICON} !", COLOR_URGENT
+    else:
+        minutes = (today or {}).get("totalMinutes", 0)
+        text, color = f"{BAR_ICON} {format_minutes(minutes)}", None
+        expire = (state.get("me") or {}).get("loginExpire")
+        if expire and (dt.datetime.fromisoformat(expire) - now).total_seconds() < EXPIRY_WARN_DAYS * 86400:
+            text += " •"
+        if now.hour >= NUDGE_HOUR and minutes < NUDGE_MINUTES:
+            color = COLOR_DIM
+    if style == "i3blocks":
+        return f"{text}\n{text}\n{color or ''}".rstrip("\n")
+    if style == "polybar" and color:
+        return f"%{{F{color}}}{text}%{{F-}}"
+    return text
+
+
+def log(command, args, result):
+    """Append save attempts to ~/.cache/timur-bar/log for troubleshooting."""
+    CACHE.mkdir(parents=True, exist_ok=True)
+    with open(CACHE / "log", "a") as f:
+        f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"),
+                            "command": command, "args": args, "result": result}) + "\n")
+
+
+def main(argv):
+    command = argv[1] if len(argv) > 1 else ""
+    try:
+        if command == "refresh":
+            date = argv[3] if len(argv) > 3 and argv[2] == "--date" else None
+            result = refresh(date)
+        elif command == "add-entry" and len(argv) > 2:
+            result = add_entry(argv[2])
+        elif command == "update-entry" and len(argv) > 2:
+            result = update_entry(argv[2])
+        elif command == "delete-entry" and len(argv) > 2:
+            result = delete_entry(argv[2], argv[3] if len(argv) > 3 else None)
+        elif command == "add-note" and len(argv) > 3:
+            result = add_note(argv[2], argv[3])
+        elif command == "set-session":
+            if "--window" in argv:
+                script = os.path.abspath(argv[0])
+                subprocess.Popen(["setsid", *terminal_command(
+                    "Timur session", f'"{script}" set-session; echo; printf "Press Enter to close. "; read _')])
+                return 0
+            return set_session()
+        elif command == "bar":
+            style = "polybar" if "--polybar" in argv else "i3blocks" if "--i3blocks" in argv else "plain"
+            print(bar_text(style))
+            return 0
+        else:
+            print(__doc__.strip(), file=sys.stderr)
+            return 2
+    except TimurError as e:
+        result = {"ok": False, "error": str(e), "errorKind": e.kind}
+    except (KeyError, ValueError) as e:
+        result = {"ok": False, "error": f"Bad input: {e}", "errorKind": "error"}
+    if command in ("add-entry", "update-entry", "delete-entry", "add-note"):
+        log(command, argv[2:], result)
+    print(json.dumps(result if command != "refresh" else {k: v for k, v in result.items() if k != "state"}))
+    return 0 if result.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

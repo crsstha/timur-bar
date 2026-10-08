@@ -1,0 +1,10 @@
+#!/bin/sh
+# i3blocks block for Timur: prints the bar text and handles clicks.
+#   left: menu · middle: refresh · right: open Timur · scroll up: log time
+case "$BLOCK_BUTTON" in
+  1) setsid -f timur-menu >/dev/null 2>&1 ;;
+  2) systemctl --user start timur-bar-refresh.service ;;
+  3) setsid -f xdg-open https://timur.dev.togglecorp.com/ >/dev/null 2>&1 ;;
+  4) setsid -f timur-menu log >/dev/null 2>&1 ;;
+esac
+exec timur-bar bar --i3blocks

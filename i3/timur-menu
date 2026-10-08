@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""rofi front end for timur-bar (i3 / any X11 or Wayland desktop with rofi).
+
+  timur-menu                 main menu
+  timur-menu log             log time straight away
+  timur-menu note            add a journal line straight away
+  timur-menu entries         today's entries (edit / delete)
+  --yesterday                work on yesterday instead of today
+
+Reads ~/.cache/timur-bar/state.json and runs `timur-bar` for every change.
+"""
+
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+STATE = Path.home() / ".cache/timur-bar/state.json"
+WEB_APP = "https://timur.dev.togglecorp.com/"
+STATUS_ORDER = ["DONE", "DOING", "TODO"]
+
+
+def find_cli():
+    if os.environ.get("TIMUR_BAR_CLI"):
+        return os.environ["TIMUR_BAR_CLI"]
+    sibling = Path(__file__).resolve().parent.parent / "bin" / "timur-bar"
+    return str(sibling) if sibling.exists() else (shutil.which("timur-bar") or "timur-bar")
+
+
+CLI = find_cli()
+
+
+# ---------------------------------------------------------------- helpers
+
+def rofi(prompt, options=(), mesg=None, text_input=False, prefill=None, selected=0):
+    """Show a rofi dmenu. Returns the chosen index (lists) or the typed text (text_input), None on Esc."""
+    cmd = ["rofi", "-dmenu", "-i", "-p", prompt]
+    if mesg:
+        cmd += ["-mesg", mesg]
+    if text_input:
+        cmd += ["-l", "0"]
+        if prefill:
+            cmd += ["-filter", prefill]
+    else:
+        cmd += ["-format", "i", "-no-custom", "-selected-row", str(selected)]
+    result = subprocess.run(cmd, input="\n".join(options), capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    out = result.stdout.strip()
+    if text_input:
+        return out
+    return int(out) if out.isdigit() else None
+
+
+def notify(summary, body="", urgent=False):
+    subprocess.run(["notify-send", "--app-name=Timur", "--icon=appointment-new",
+                    *(["--urgency=critical"] if urgent else []), summary, body], check=False)
+
+
+def run_cli(*args):
+    result = subprocess.run([CLI, *args], capture_output=True, text=True)
+    try:
+        return json.loads(result.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"ok": False, "error": (result.stderr or "timur-bar failed").strip()}
+
+
+def load_state():
+    try:
+        return json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def format_minutes(minutes):
+    minutes = round(minutes or 0)
+    hours, rest = divmod(minutes, 60)
+    return f"{rest}m" if hours == 0 else f"{hours}h" + (f"{rest:02d}" if rest else "")
+
+
+def parse_duration(text):
+    """Hours by default: 1 · 1.5 · .5 · 2h · 1h30 · 1:30; minutes need 'm': 45m. 0 if invalid or > 24h."""
+    s = re.sub(r"\s+", "", str(text or "").lower())
+    minutes = 0
+    if m := re.fullmatch(r"(\d+):([0-5]\d)", s):
+        minutes = int(m[1]) * 60 + int(m[2])
+    elif m := re.fullmatch(r"(\d+(?:\.\d+)?)h(?:(\d+)m?)?", s):
+        minutes = round(float(m[1]) * 60) + int(m[2] or 0)
+    elif m := re.fullmatch(r"(\d+)m", s):
+        minutes = int(m[1])
+    elif m := re.fullmatch(r"(\d*\.?\d+)", s):
+        minutes = round(float(m[1]) * 60)
+    return minutes if 0 < minutes <= 24 * 60 else 0
+
+
+class Context:
+    def __init__(self, yesterday):
+        self.state = load_state()
+        self.yesterday = yesterday
+        day = dt.date.today() - dt.timedelta(days=1 if yesterday else 0)
+        self.date = day.isoformat()
+        self.day_name = "Yesterday" if yesterday else "Today"
+
+    def reload(self):
+        self.state = load_state()
+
+    @property
+    def day(self):
+        return (self.state.get("days") or {}).get(self.date) or {"entries": [], "totalMinutes": 0, "journal": ""}
+
+    def task_label(self, task_id):
+        for t in self.state.get("tasks") or []:
+            if str(t["id"]) == str(task_id):
+                return t["label"]
+        return ""
+
+    def ordered_tasks(self):
+        recent = self.state.get("recentTaskIds") or []
+        tasks = self.state.get("tasks") or []
+        rank = {tid: i for i, tid in enumerate(recent)}
+        return sorted(tasks, key=lambda t: (rank.get(str(t["id"]), 9999), t["label"].lower())), set(recent)
+
+    def type_options(self, preferred=None):
+        types = self.state.get("types") or []
+        keys = [t["key"] for t in types]
+        default = preferred if preferred in keys else ("DEVELOPMENT" if "DEVELOPMENT" in keys else (keys[0] if keys else None))
+        return types, (keys.index(default) if default in keys else 0)
+
+
+# ---------------------------------------------------------------- pickers
+
+def pick_task(ctx, prompt="Task", current=None):
+    tasks, recent = ctx.ordered_tasks()
+    if not tasks:
+        notify("Timur", "No tasks loaded — refresh or check your session", urgent=True)
+        return None
+    lines = [("★ " if str(t["id"]) in recent else "   ") + t["label"] for t in tasks]
+    selected = next((i for i, t in enumerate(tasks) if str(t["id"]) == str(current)), 0)
+    index = rofi(prompt, lines, mesg="★ = used in the last 7 days", selected=selected)
+    return None if index is None else str(tasks[index]["id"])
+
+
+def ask_duration(prefill=None):
+    mesg = "Hours: 1 · 1.5 · 0.25 · 1h30 · 1:30 — or minutes with m: 45m"
+    while True:
+        text = rofi("Hours", text_input=True, mesg=mesg, prefill=prefill)
+        if text is None:
+            return None
+        minutes = parse_duration(text)
+        if minutes:
+            return minutes
+        mesg, prefill = f"“{text}” isn't a duration (max 24h). Try 1.5 or 45m", text
+
+
+def pick_type(ctx, preferred=None):
+    types, default = ctx.type_options(preferred)
+    if not types:
+        return preferred or "DEVELOPMENT"
+    index = rofi("Type", [t["label"] for t in types], selected=default)
+    return None if index is None else types[index]["key"]
+
+
+def pick_status(current="DONE"):
+    index = rofi("Status", STATUS_ORDER, selected=STATUS_ORDER.index(current) if current in STATUS_ORDER else 0)
+    return None if index is None else STATUS_ORDER[index]
+
+
+# ---------------------------------------------------------------- flows
+
+def log_time(ctx):
+    task = pick_task(ctx, f"Log time · {ctx.day_name}")
+    if task is None:
+        return
+    minutes = ask_duration()
+    if minutes is None:
+        return
+    description = rofi("Description", text_input=True, mesg=f"{ctx.task_label(task)} · {format_minutes(minutes)}")
+    if description is None:
+        return
+    entry_type = pick_type(ctx, (ctx.state.get("lastTypeByTask") or {}).get(task))
+    if entry_type is None:
+        return
+    status = pick_status("DONE")
+    if status is None:
+        return
+    result = run_cli("add-entry", json.dumps({
+        "date": ctx.date, "task": task, "type": entry_type, "status": status,
+        "duration": minutes, "description": description.strip(),
+    }))
+    if result.get("ok"):
+        notify("Timur", f"Logged {format_minutes(minutes)} to {ctx.task_label(task)}")
+    else:
+        notify("Timur — not saved", result.get("error", "Unknown error"), urgent=True)
+
+
+def add_note(ctx):
+    journal = (ctx.day.get("journal") or "").strip().splitlines()
+    mesg = "\n".join(journal[-6:]) if journal else "Journal is empty"
+    text = rofi(f"Journal · {ctx.day_name}", text_input=True, mesg=mesg)
+    if not text or not text.strip():
+        return
+    result = run_cli("add-note", ctx.date, text.strip())
+    if result.get("ok"):
+        notify("Timur", f"Added to {ctx.day_name.lower()}'s journal: {result.get('line', text)}")
+    else:
+        notify("Timur — not saved", result.get("error", "Unknown error"), urgent=True)
+
+
+def entry_line(e):
+    desc = f" — {e['description']}" if e.get("description") else ""
+    return f"{format_minutes(e.get('duration')):>6}  {e.get('task', '?')}{desc}  [{e.get('status', '')}]"
+
+
+def entries(ctx):
+    while True:
+        items = ctx.day.get("entries") or []
+        if not items:
+            rofi(f"{ctx.day_name}", ["Nothing logged yet"], mesg=f"{ctx.day_name}: 0m")
+            return
+        index = rofi(f"Entries · {ctx.day_name}", [entry_line(e) for e in items],
+                     mesg=f"{ctx.day_name}: {format_minutes(ctx.day.get('totalMinutes'))} — pick one to edit or delete")
+        if index is None:
+            return
+        edit_entry(ctx, items[index])
+        ctx.reload()
+
+
+def edit_entry(ctx, entry):
+    if not entry.get("clientId"):
+        notify("Timur", "This entry has no clientId — edit it in the web app", urgent=True)
+        return
+    fields = {
+        "clientId": entry["clientId"], "date": ctx.date, "task": entry.get("taskId"),
+        "type": entry.get("type"), "status": entry.get("status") or "DONE",
+        "duration": entry.get("duration"), "description": entry.get("description") or "",
+    }
+    while True:
+        options = [
+            f"Duration:     {format_minutes(fields['duration'])}",
+            f"Description:  {fields['description'] or '—'}",
+            f"Status:       {fields['status']}",
+            f"Type:         {fields['type']}",
+            f"Task:         {ctx.task_label(fields['task']) or entry.get('task')}",
+            "✓ Save changes",
+            "✗ Delete this entry",
+        ]
+        index = rofi("Edit entry", options, mesg=entry_line(entry))
+        if index is None:
+            return
+        if index == 0:
+            fields["duration"] = ask_duration(format_minutes(fields["duration"])) or fields["duration"]
+        elif index == 1:
+            text = rofi("Description", text_input=True, prefill=fields["description"])
+            if text is not None:
+                fields["description"] = text.strip()
+        elif index == 2:
+            fields["status"] = pick_status(fields["status"]) or fields["status"]
+        elif index == 3:
+            fields["type"] = pick_type(ctx, fields["type"]) or fields["type"]
+        elif index == 4:
+            fields["task"] = pick_task(ctx, "Task", fields["task"]) or fields["task"]
+        elif index == 5:
+            result = run_cli("update-entry", json.dumps(fields))
+            if result.get("ok"):
+                notify("Timur", f"Updated {format_minutes(fields['duration'])} · {ctx.task_label(fields['task']) or entry.get('task')}")
+            else:
+                notify("Timur — not saved", result.get("error", "Unknown error"), urgent=True)
+            return
+        elif index == 6:
+            if rofi("Delete?", ["Keep it", "Yes, delete"], mesg=entry_line(entry)) == 1:
+                result = run_cli("delete-entry", entry["clientId"], ctx.date)
+                if result.get("ok"):
+                    notify("Timur", f"Deleted {format_minutes(entry.get('duration'))} · {entry.get('task')}")
+                else:
+                    notify("Timur — not deleted", result.get("error", "Unknown error"), urgent=True)
+            return
+
+
+def main_menu(ctx):
+    while True:
+        state = ctx.state
+        if state.get("errorKind") == "auth" or not state.get("days"):
+            header = f"Not connected: {state.get('error') or 'no session'}"
+        else:
+            who = (state.get("me") or {}).get("displayName") or ""
+            header = f"{ctx.day_name}: {format_minutes(ctx.day.get('totalMinutes'))} logged · {who}"
+        options = [
+            "  Log time",
+            "  Add journal note",
+            f"  Entries ({len(ctx.day.get('entries') or [])}) — edit / delete",
+            f"  Switch to {'today' if ctx.yesterday else 'yesterday'}",
+            "  Refresh",
+            "  Open Timur in the browser",
+            "  Paste new session",
+        ]
+        index = rofi("Timur", options, mesg=header)
+        if index is None:
+            return
+        if index == 0:
+            log_time(ctx)
+        elif index == 1:
+            add_note(ctx)
+        elif index == 2:
+            entries(ctx)
+        elif index == 3:
+            ctx = Context(not ctx.yesterday)
+            continue
+        elif index == 4:
+            result = run_cli("refresh")
+            if not result.get("ok"):
+                notify("Timur — refresh failed", result.get("error", ""), urgent=True)
+        elif index == 5:
+            subprocess.Popen(["xdg-open", WEB_APP], start_new_session=True)
+            return
+        elif index == 6:
+            subprocess.Popen([CLI, "set-session", "--window"], start_new_session=True)
+            return
+        ctx.reload()
+
+
+def main(argv):
+    if not shutil.which("rofi"):
+        notify("Timur", "rofi is not installed (pacman -S rofi)", urgent=True)
+        return 1
+    ctx = Context("--yesterday" in argv)
+    command = next((a for a in argv[1:] if not a.startswith("--")), "main")
+    {"main": main_menu, "log": log_time, "note": add_note, "entries": entries}.get(command, main_menu)(ctx)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
