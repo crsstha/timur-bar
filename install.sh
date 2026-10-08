@@ -62,7 +62,7 @@ add_block() {  # add_block SNIPPET TARGET — append once, between markers
   fi
 }
 
-chmod +x "$REPO/bin/"* "$REPO/i3/timur-menu" "$REPO/i3/i3blocks-timur"
+chmod +x "$REPO/bin/"* "$REPO/i3/timur-panel" "$REPO/i3/timur-menu" "$REPO/i3/i3blocks-timur"
 
 echo "--> Script"
 link "$REPO/bin/timur-bar" "$BIN/timur-bar"
@@ -95,12 +95,15 @@ if [[ $frontend == omarchy ]]; then
   fi
 else
   echo "--> i3 front end"
+  link "$REPO/i3/timur-panel" "$BIN/timur-panel"
   link "$REPO/i3/timur-menu" "$BIN/timur-menu"
   link "$REPO/i3/i3blocks-timur" "$BIN/i3blocks-timur"
   (( bindings )) && add_block "$REPO/i3/i3.config" "$HOME/.config/i3/config"
   for dep in rofi notify-send; do
     command -v "$dep" >/dev/null 2>&1 || echo "    ! missing: $dep  (sudo pacman -S ${dep/notify-send/libnotify})"
   done
+  python3 -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null \
+    || echo "    ! missing: GTK for the panel  (sudo pacman -S python-gobject gtk3)"
   pgrep -x dunst >/dev/null 2>&1 || echo "    ! no dunst running — notifications need a daemon (sudo pacman -S dunst)"
   cat <<EOF
     Add the bar module yourself (one of):

@@ -1,232 +1,949 @@
 # timur-bar
 
-Log time and journal notes to [Timur](https://timur.dev.togglecorp.com/) (Togglecorp's timesheet) from your desktop bar, without opening the web app.
+Log your time and journal notes to [Timur](https://timur.dev.togglecorp.com/) directly from your desktop bar. You do not need to open the Timur website.
 
-- **Omarchy:** a bar plugin with a panel: task search, hours, description, today's entries with **Edit / Delete**, and the journal.
-- **i3:** a polybar or i3blocks module plus **rofi** menus for the same actions.
+It shows how much time you have logged today in the top bar. Click the time to open a small panel where you can:
 
-```
- 󰔟 5h20      logged today
- 󰔟 1h10      dimmed: after 17:00 with under 2h logged
- 󰔟 5h20 •    session expires within 3 days
- 󰔟 !         not connected / session expired
-```
+* Log time
+* Edit or delete today's entries
+* Add journal notes
 
-## How it works
+```text
+󰔟 5h20      you've logged 5h20 today
 
-```
-bin/timur-bar  ── the only part that talks to Timur (GraphQL + your session cookie)
-   │  refresh every 5 min (systemd user timer) → ~/.cache/timur-bar/state.json
-   ▼
-Omarchy: Panel.qml / BarWidget.qml      i3: timur-bar bar  +  i3/timur-menu (rofi)
+󰔟 1h10      after 17:00 and you've logged less than 2h
+
+󰔟 5h20 •    your Timur session expires within 3 days
+
+󰔟 !         not connected, or your session has expired
 ```
 
-Both front ends read the same cached state and call the same script to save, so they behave the same.
+## Contents
 
-## Requirements
+* [Which setup is yours?](#which-setup-is-yours)
+* [Before you start](#before-you-start)
+* [Install on Omarchy](#install-on-omarchy)
+* [Install on i3 (Arch Linux)](#install-on-i3-arch-linux)
+* [Connect your Timur account](#connect-your-timur-account)
+* [Everyday use](#everyday-use)
+* [Setting it up for someone else / on another computer](#setting-it-up-for-someone-else--on-another-computer)
+* [Update](#update) · [Uninstall](#uninstall) · [Troubleshooting](#troubleshooting)
+* [How it works](#how-it-works) · [Commands](#commands) · [Notes for maintainers](#notes-for-maintainers)
 
-- Python 3 (standard library only), systemd user session, `notify-send`
-- **Omarchy:** nothing else
-- **i3:** `rofi`, a notification daemon (`dunst`), and `polybar` or `i3blocks`
-- A Timur account you can log into in the browser
+## Which setup is yours?
+
+| You use…                                | You get                                                                         | Follow                                     |
+| --------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------ |
+| **Omarchy** (Hyprland)                  | A widget in the Omarchy bar that opens the Timur panel                          | [Install on Omarchy](#install-on-omarchy)  |
+| **i3** with **polybar** or **i3blocks** | A bar module that opens the same panel in the top-right corner, plus rofi menus | [Install on i3](#install-on-i3-arch-linux) |
+
+Both versions work in the same way. They use the same script to communicate with Timur.
+
+## Before you start
+
+You need:
+
+* A **Timur account** that you can log into from your browser.
+* **Linux with systemd**. A systemd timer refreshes your Timur data every 5 minutes.
+* **Python 3**. You do not need to install anything extra for the main script.
+* **`~/.local/bin` must be in your `PATH`**. The installer puts the `timur-bar` command there.
+
+Check your `PATH` with:
+
+```bash
+echo $PATH
+```
+
+If `~/.local/bin` is not there, add this to `~/.profile`, `~/.zshrc`, or `~/.bashrc`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then open a new terminal.
+
+**About paths in this guide:**
+
+`~` means your home directory.
+
+For example:
+
+```text
+/home/yourname
+```
+
+The commands in this guide assume that you clone the repository here:
+
+```text
+~/Projects/timur-bar
+```
+
+If you clone it somewhere else, replace `~/Projects/timur-bar` with your own path.
 
 ## Install on Omarchy
 
-**1. Get the code** (either way works):
+### 1. Get the code
+
+Choose one of these options.
+
+#### Option A: Git clone
+
+You can clone the repository anywhere you want:
 
 ```bash
-# a) git clone — keep it wherever you like
 git clone https://github.com/crsstha/timur-bar.git ~/Projects/timur-bar
-cd ~/Projects/timur-bar
 
-# b) Omarchy's plugin manager — clones into ~/.config/omarchy/plugins/crsstha.timur
-#    and lets you update later with `omarchy plugin update`
+cd ~/Projects/timur-bar
+```
+
+#### Option B: Omarchy plugin manager
+
+This option lets you update the plugin later using `omarchy plugin update`.
+
+```bash
 omarchy plugin add https://github.com/crsstha/timur-bar.git --enable
+
 cd ~/.config/omarchy/plugins/crsstha.timur
 ```
 
-**2. Run the installer:**
+### 2. Run the installer
+
+Run this from the `timur-bar` folder:
 
 ```bash
 ./install.sh
 ```
 
-It:
-- links `bin/timur-bar` to `~/.local/bin`;
-- starts the 5-minute refresh timer;
-- puts the widget on the right of the bar;
-- adds `Super+Alt+T` / `Super+Alt+J` to `~/.config/hypr/bindings.lua`.
+The installer will:
 
-**3. Connect your Timur session.** The installer asks for this on first run; see [Connect your session](#connect-your-session).
+* Add the `timur-bar` command to `~/.local/bin`.
+* Enable the 5-minute refresh timer.
+* Add the Timur widget to the right side of the bar.
+* Add these shortcuts to `~/.config/hypr/bindings.lua`:
 
-**4. Check it works:**
-- The bar shows `󰔟 0m` (or your logged time). If you don't see it, run `omarchy restart shell`.
-- `Super+Alt+T` opens the panel.
-- `timur-bar refresh` prints `{"ok": true}`.
+  * `Super+Alt+T`
+  * `Super+Alt+J`
+
+### 3. Connect your Timur account
+
+The installer asks you to do this the first time.
+
+See [Connect your Timur account](#connect-your-timur-account).
+
+### 4. Check that it works
+
+* The bar should show `󰔟 0m` or your logged time.
+* If it does not appear, run:
+
+```bash
+omarchy restart shell
+```
+
+* Press `Super+Alt+T` to open the panel.
+* Run:
+
+```bash
+timur-bar refresh
+```
+
+It should print:
+
+```text
+{"ok": true}
+```
 
 ## Install on i3 (Arch Linux)
 
-**1. Install the dependencies:**
+On i3, clicking the bar module opens **`timur-panel`**.
+
+It is a GTK version of the Omarchy panel and appears in the top-right corner of your screen.
+
+The Omarchy panel (`Panel.qml`) only works inside Omarchy, so i3 has its own GTK version.
+
+The older **rofi** menus are also available.
+
+### 1. Install the required packages
+
+Run:
 
 ```bash
-sudo pacman -S --needed git python rofi dunst libnotify xdg-utils alacritty ttf-nerd-fonts-symbols
-sudo pacman -S --needed polybar      # or: i3blocks
+sudo pacman -S --needed git python python-gobject gtk3 rofi dunst libnotify xdg-utils ttf-nerd-fonts-symbols
+
+sudo pacman -S --needed polybar
 ```
 
-`ttf-nerd-fonts-symbols` provides the `󰔟` icon. To use plain text instead, set `export TIMUR_BAR_ICON="T:"` in `~/.profile`.
+If you use i3blocks instead of polybar, install:
 
-**2. Get the code and run the installer:**
+```bash
+sudo pacman -S --needed i3blocks
+```
+
+| Package                  | Why you need it                                  |
+| ------------------------ | ------------------------------------------------ |
+| `python-gobject`, `gtk3` | Used to create the Timur panel                   |
+| `rofi`                   | Provides the fallback menus                      |
+| `dunst`, `libnotify`     | Shows notifications such as "Logged 1h30 to …"   |
+| `xdg-utils`              | Opens Timur in your browser when you right-click |
+| `ttf-nerd-fonts-symbols` | Provides the `󰔟` icon                           |
+
+If you do not want to use the `󰔟` icon, you can use another icon or text by adding this to `~/.profile`:
+
+```bash
+export TIMUR_BAR_ICON="T:"
+```
+
+The command:
+
+```bash
+timur-bar set-session --window
+```
+
+opens a terminal window.
+
+It uses `$TERMINAL` if you have set it.
+
+Otherwise, it looks for one of these terminals:
+
+```text
+alacritty
+kitty
+foot
+wezterm
+gnome-terminal
+xterm
+```
+
+### 2. Get the code and run the installer
 
 ```bash
 git clone https://github.com/crsstha/timur-bar.git ~/Projects/timur-bar
+
 cd ~/Projects/timur-bar
+
 ./install.sh --i3
 ```
 
-It:
-- links `timur-bar`, `timur-menu` and `i3blocks-timur` into `~/.local/bin`;
-- starts the refresh timer;
-- appends a marked block to `~/.config/i3/config`, with the keybindings and an `import-environment` line so the timers can send notifications.
+The installer will:
 
-**3. Make sure notifications work.** If `dunst` isn't started anywhere yet, add this to `~/.config/i3/config`:
+* Add these commands to `~/.local/bin`:
 
+  * `timur-bar`
+  * `timur-panel`
+  * `timur-menu`
+  * `i3blocks-timur`
+* Enable the 5-minute refresh timer.
+* Add a Timur configuration block to:
+
+  ```text
+  ~/.config/i3/config
+  ```
+
+The added block is marked with:
+
+```text
+# >>> timur-bar >>>
+
+...
+
+# <<< timur-bar <<<
 ```
+
+The block:
+
+* Adds these shortcuts:
+
+  * `Super+Alt+t`
+  * `Super+Alt+j`
+  * `Super+Alt+e`
+* Uses `Mod4+Mod1`, so the shortcuts work even if your `$mod` is Super or Alt.
+* Makes the Timur panel a floating window without a border.
+* Allows the refresh timer to show notifications.
+
+If your i3 config is somewhere else, for example:
+
+```text
+~/.i3/config
+```
+
+copy the contents of:
+
+```text
+~/Projects/timur-bar/i3/i3.config
+```
+
+into your i3 config manually.
+
+### 3. Make sure notifications work
+
+If `dunst` does not start automatically, add this to:
+
+```text
+~/.config/i3/config
+```
+
+```text
 exec --no-startup-id dunst
 ```
 
-**4. Add the module to your bar.** Choose **one**:
+### 4. Add Timur to your bar
 
-<details open><summary><b>polybar</b></summary>
+Choose **one**:
 
-1. Append the module to your polybar config:
-   ```bash
-   cat ~/Projects/timur-bar/i3/polybar.ini >> ~/.config/polybar/config.ini
-   ```
-2. In your `[bar/…]` section, add `timur` to a modules list, and make sure a font has the icon:
-   ```ini
-   modules-right = timur date
-   font-1 = "Symbols Nerd Font:size=11"
-   ```
-3. Restart polybar, e.g. `polybar-msg cmd restart` or your launch script.
+<details open>
+<summary><b>polybar</b></summary>
+
+#### 1. Add the Timur module
+
+The usual polybar config file is:
+
+```text
+~/.config/polybar/config.ini
+```
+
+Run:
+
+```bash
+command cat ~/Projects/timur-bar/i3/polybar.ini >> ~/.config/polybar/config.ini
+```
+
+**Important:** use `command cat`, not just `cat`.
+
+Your shell may have `cat` aliased to another command such as `bat`. In that case, using plain `cat` can cause problems and may write unwanted text into your config.
+
+#### 2. Add `timur` to `modules-right`
+
+Find the `[bar/...]` section in your polybar config.
+
+Add `timur` to `modules-right`.
+
+Put it last if you want Timur on the top-right:
+
+```ini
+modules-right = … date timur
+```
+
+#### 3. Make sure the icon font is available
+
+One of your polybar fonts must support the Timur icon.
+
+Any Nerd Font should work.
+
+If you do not have one, add a font such as:
+
+```ini
+font-2 = "Symbols Nerd Font:size=11"
+```
+
+Use the next available font number.
+
+#### 4. Restart polybar
+
+Run:
+
+```bash
+polybar-msg cmd restart
+```
+
+Or use your normal polybar launch script.
 
 </details>
 
-<details><summary><b>i3blocks</b></summary>
+<details>
+<summary><b>i3blocks</b></summary>
 
-1. Append the block:
-   ```bash
-   mkdir -p ~/.config/i3blocks
-   cat ~/Projects/timur-bar/i3/i3blocks.conf >> ~/.config/i3blocks/config
-   ```
-2. Make sure i3's bar uses i3blocks, in `~/.config/i3/config`:
-   ```
-   bar {
-       status_command i3blocks
-   }
-   ```
+#### 1. Add the Timur block
+
+Create the i3blocks config directory if needed:
+
+```bash
+mkdir -p ~/.config/i3blocks
+```
+
+Then add the Timur block:
+
+```bash
+command cat ~/Projects/timur-bar/i3/i3blocks.conf >> ~/.config/i3blocks/config
+```
+
+#### 2. Make sure i3 uses i3blocks
+
+In:
+
+```text
+~/.config/i3/config
+```
+
+make sure your bar contains:
+
+```text
+bar {
+    status_command i3blocks
+}
+```
 
 </details>
 
-**5. Reload i3** with `$mod+Shift+r`.
+### 5. Reload i3
 
-**6. Connect your Timur session.** The installer asks on first run, or run `timur-bar set-session`. See [Connect your session](#connect-your-session).
+Press:
 
-**7. Check it works:**
-- `timur-bar bar` prints e.g. `󰔟 0m`.
-- The bar shows the same text, and left-clicking it opens the rofi menu.
-- `$mod+Alt+t` asks for a task.
+```text
+$mod+Shift+r
+```
 
-## Connect your session
+### 6. Connect your Timur account
 
-Timur signs in with Google and has no API keys, so `timur-bar` reuses your browser session:
+The installer asks for your Timur login the first time.
 
-1. Log into the Timur web app → **F12** → **Application** → **Cookies** → `https://timur.dev.togglecorp.com`.
-2. Run `timur-bar set-session`, or use **Paste session** in the panel or menu.
-3. Paste the **Value** of each cookie:
+You can also run:
 
-   | Cookie | |
-   |---|---|
-   | `__Secure-timur-PROD-sessionid` | your login session |
-   | `timur-PROD-csrftoken` | CSRF token |
+```bash
+timur-bar set-session
+```
 
-It's saved to `~/.config/timur-bar/session` (`chmod 600`). Sessions last about a month, and the bar shows `•` three days before expiry. To renew, run `timur-bar set-session` again.
+See [Connect your Timur account](#connect-your-timur-account).
 
-> ⚠ The session cookie is as good as your password for Timur. Never commit or share it.
+### 7. Check that it works
+
+Run:
+
+```bash
+timur-bar bar
+```
+
+You should see something like:
+
+```text
+󰔟 0m
+```
+
+The same text should appear in your bar.
+
+You can then:
+
+* Left-click the module, or press `Super+Alt+t`, to open the panel.
+* The panel opens in the top-right corner.
+* Press `Esc` or click somewhere else to close it.
+
+If the panel covers your bar or leaves a gap, set the bar height.
+
+For example, if your bar is 30 pixels high, add this to `~/.profile`:
+
+```bash
+export TIMUR_PANEL_OFFSET=30
+```
+
+Change `30` to your actual bar height.
+
+Then log out and log back in.
+
+## Connect your Timur account
+
+Timur uses Google login and does not provide API keys.
+
+Because of this, `timur-bar` uses your **existing browser login**.
+
+It needs two cookies from your Timur browser session.
+
+### Steps
+
+#### 1. Log into Timur
+
+Open:
+
+https://timur.dev.togglecorp.com/
+
+Log in normally.
+
+#### 2. Open browser developer tools
+
+Press:
+
+```text
+F12
+```
+
+Then:
+
+* In Chrome: open **Application**
+* In Firefox: open **Storage**
+
+Go to:
+
+```text
+Cookies
+```
+
+Then select:
+
+```text
+https://timur.dev.togglecorp.com
+```
+
+#### 3. Start the session setup
+
+Run:
+
+```bash
+timur-bar set-session
+```
+
+Or open the Timur panel and click:
+
+```text
+Paste session
+```
+
+#### 4. Copy the cookie values
+
+When asked, copy the **Value** column for these two cookies:
+
+| Cookie name                     | What it does                           |
+| ------------------------------- | -------------------------------------- |
+| `__Secure-timur-PROD-sessionid` | Your Timur login                       |
+| `timur-PROD-csrftoken`          | Security token needed when saving data |
+
+The cookies are saved here:
+
+```text
+~/.config/timur-bar/session
+```
+
+Only your user can read this file.
+
+Your login normally lasts about one month.
+
+The bar shows:
+
+```text
+•
+```
+
+three days before the session expires.
+
+To log in again, run:
+
+```bash
+timur-bar set-session
+```
+
+> ⚠ **Important:** These cookies are as sensitive as your Timur password.
+>
+> Never:
+>
+> * Commit them to Git.
+> * Paste them into chat.
+> * Send them to someone else.
+
+## Everyday use
+
+| To…                     | Omarchy                                     | i3                                                                                                        |
+| ----------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Open the panel          | `Super+Alt+T` or left-click the widget      | `Super+Alt+t` or left-click the module                                                                    |
+| Add a journal note      | `Super+Alt+J`                               | `Super+Alt+j`                                                                                             |
+| Edit or delete an entry | Hover over the entry under **Logged today** | Click **Edit** or **Delete** next to the entry under **Logged today**. `Super+Alt+e` also opens the panel |
+| Save without clicking   | `Ctrl+Enter`                                | `Ctrl+Enter`                                                                                              |
+| Close the panel         | `Esc`                                       | `Esc`, or click somewhere else                                                                            |
+| Work on yesterday       | **Yesterday** button                        | **Yesterday** button                                                                                      |
+| Refresh now             | Middle-click                                | Middle-click                                                                                              |
+| Open Timur in browser   | Right-click                                 | Right-click                                                                                               |
+| Use rofi menus          | —                                           | Scroll up on the module, or run `timur-menu`                                                              |
+
+### Logging time
+
+When logging time:
+
+1. Start typing part of the task name.
+2. For example:
+
+   ```text
+   tc gen
+   ```
+3. Choose the task using:
+
+   * Arrow keys + `Enter`, or
+   * Mouse click.
+4. Enter the duration.
+5. Enter a description.
+6. Click **Save**.
+
+Tasks you used during the last 7 days are marked as **recent** and appear first.
+
+The task type is automatically filled using the type you last used for that task.
+
+### Duration format
+
+By default, durations are entered as **hours**.
+
+Add `m` when you want to enter minutes.
+
+| You type         | Saved as                                 |
+| ---------------- | ---------------------------------------- |
+| `1`              | 1h                                       |
+| `1.5`            | 1h30                                     |
+| `0.25`           | 15m                                      |
+| `1h30` or `1:30` | 1h30                                     |
+| `45m`            | 45 minutes                               |
+| More than 24h    | Refused because it is probably a mistake |
+
+### Journal
+
+Every journal note is added as a new line:
+
+```text
+- HH:MM your text
+```
+
+Timur saves the complete journal at once.
+
+Because of this, `timur-bar` reads the latest journal again before saving it.
+
+**Do not edit the same day's journal in the Timur website at the same time.**
+
+## Setting it up for someone else / on another computer
+
+Each person should install `timur-bar` on their own computer and connect their own Timur account.
+
+Nothing is shared between computers or users.
+
+### Setup for another person
+
+1. Install `timur-bar` using the correct instructions:
+
+   * [Omarchy](#install-on-omarchy)
+   * [i3](#install-on-i3-arch-linux)
+
+2. The person logs into Timur using **their own browser**.
+
+3. They run:
+
+   ```bash
+   timur-bar set-session
+   ```
+
+4. They use **their own cookies**.
+
+Never copy:
+
+```text
+~/.config/timur-bar/session
+```
+
+from one person's computer to another.
+
+Otherwise, time could be logged under the wrong person's account.
+
+### Moving to a new computer
+
+If you are moving to a new computer:
+
+1. Install `timur-bar` again.
+2. Run:
+
+   ```bash
+   timur-bar set-session
+   ```
+
+This is easier and safer than copying the old files.
+
+### Not using Arch?
+
+The main script only needs:
+
+* Python 3
+* systemd
+
+For the i3 version, install the equivalent packages for your Linux distribution.
+
+These distributions are not officially tested by the maintainers.
+
+| Distro          | Command                                                                                             |
+| --------------- | --------------------------------------------------------------------------------------------------- |
+| Debian / Ubuntu | `sudo apt install git python3 python3-gi gir1.2-gtk-3.0 rofi dunst libnotify-bin xdg-utils polybar` |
+| Fedora          | `sudo dnf install git python3 python3-gobject gtk3 rofi dunst libnotify xdg-utils polybar`          |
+
+You also need a Nerd Font for the icon.
+
+Or use:
+
+```bash
+export TIMUR_BAR_ICON="T:"
+```
+
+Then continue from step 2 of [Install on i3](#install-on-i3-arch-linux).
+
+### Not using i3?
+
+You can also use the i3 version on another X11 desktop that supports running a script from its bar, such as polybar.
+
+Point the bar click action to:
+
+```text
+~/.local/bin/timur-panel
+```
+
+The keybindings and `for_window` rule are specific to i3, so you need to configure those parts yourself for your window manager.
 
 ## Update
 
+If you cloned the repository manually:
+
 ```bash
-cd ~/Projects/timur-bar && git pull     # or: omarchy plugin update crsstha.timur
-./install.sh                             # safe to re-run; picks up new files
-omarchy restart shell                    # Omarchy only, to reload the panel
+cd ~/Projects/timur-bar && git pull
 ```
 
-## Usage
+If you installed it using the Omarchy plugin manager:
 
-| | Omarchy | i3 |
-|---|---|---|
-| Log time | `Super+Alt+T` or left-click | `$mod+Alt+t`, scroll up on the module, or left-click → *Log time* |
-| Journal note | `Super+Alt+J` | `$mod+Alt+j` |
-| Edit / delete entries | hover an entry in *Logged today* | `$mod+Alt+e` or menu → *Entries* |
-| Refresh | middle-click | middle-click |
-| Open Timur in the browser | right-click | right-click |
-| Yesterday | *Yesterday* button | menu → *Switch to yesterday* |
+```bash
+omarchy plugin update crsstha.timur
+```
 
-**Duration is in hours:**
+Then run:
 
-| Input | Saved |
-|---|---|
-| `1` | 1h |
-| `1.5` | 1h30 |
-| `0.25` | 15m |
-| `1h30`, `1:30` | 1h30 |
-| `45m` | 45 minutes (needs the `m`) |
-| over 24h | rejected as a typo |
+```bash
+./install.sh
+```
 
-**Task list:** your recent tasks (last 7 days) come first. Type to search all active tasks.
+It is safe to run the installer again. It will use the latest files.
 
-**Journal:** each note is appended as `- HH:MM text`. The script re-reads the journal right before saving, because Timur replaces the whole text on save. Avoid editing the same day in the web app at the same moment.
+On Omarchy, reload the panel with:
+
+```bash
+omarchy restart shell
+```
+
+### Updating i3
+
+The installer does **not** automatically replace an existing Timur block in your i3 config.
+
+If you want the latest shortcuts or rules:
+
+1. Open:
+
+   ```text
+   ~/.config/i3/config
+   ```
+
+2. Delete everything between:
+
+   ```text
+   # >>> timur-bar >>>
+   ```
+
+   and:
+
+   ```text
+   # <<< timur-bar <<<
+   ```
+
+   Include both marker lines.
+
+3. Run:
+
+```bash
+./install.sh --i3
+```
+
+4. Reload i3:
+
+```text
+$mod+Shift+r
+```
+
+The polybar/i3blocks configuration is also not updated automatically.
+
+If:
+
+```text
+i3/polybar.ini
+```
+
+has changed, replace the `[module/timur]` section in your polybar config with the new version.
+
+## Uninstall
+
+Run the uninstall command from the folder where you cloned the repository.
+
+### Remove timur-bar but keep your saved login
+
+```bash
+~/Projects/timur-bar/uninstall.sh
+```
+
+### Remove timur-bar and also delete your saved login and cache
+
+```bash
+~/Projects/timur-bar/uninstall.sh --purge
+```
+
+The uninstall script:
+
+* Stops the refresh timer.
+* Removes the commands from `~/.local/bin`.
+* Removes the Timur blocks from:
+
+  * `~/.config/i3/config`
+  * `~/.config/hypr/bindings.lua`
+* Removes the Omarchy plugin.
+
+It **does not** modify your polybar or i3blocks config.
+
+If you used polybar or i3blocks, remove the `timur` module from those configs yourself.
+
+## Troubleshooting
+
+| What you see                                                            | What to do                                                                                                                                        |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `󰔟 !` or "Not connected"                                               | Your login is missing or expired. Run `timur-bar set-session`                                                                                     |
+| "Not logged in" after pasting                                           | You probably copied the wrong cookie. Use the **Value** of `__Secure-timur-PROD-sessionid`                                                        |
+| `timur-bar: command not found`                                          | `~/.local/bin` is not in your `PATH`. See [Before you start](#before-you-start)                                                                   |
+| "Something unexpected has occurred"                                     | Timur returned a server error. Check `~/.cache/timur-bar/log`                                                                                     |
+| "Invalid pk … does not exist"                                           | The task is no longer active. Refresh and choose the task again                                                                                   |
+| Omarchy shows old behaviour after an update                             | Run `omarchy restart shell`                                                                                                                       |
+| i3 shows `Duplicate keybinding` errors for `timur-menu` / `timur-panel` | Your Timur config is from an older version. Replace the old Timur block as explained in [Update](#update)                                         |
+| i3: clicking the module or `Super+Alt+t` does nothing                   | Run `timur-panel` in a terminal to see the error. If you see `Namespace Gtk not available`, install `python-gobject` and `gtk3`                   |
+| i3: the panel opens as a normal tiled window                            | The `for_window [class="^Timur-panel$"] ...` rule is missing. Copy it from `i3/i3.config`                                                         |
+| i3: the panel is too high/low or covers the bar                         | Set `TIMUR_PANEL_OFFSET` to your bar height                                                                                                       |
+| i3: no notifications                                                    | Check that `dunst` is running with `pgrep dunst`. Also check that the `import-environment` line from `i3/i3.config` exists in your i3 config      |
+| i3: the module is empty                                                 | Run `timur-bar bar` for polybar or `~/.local/bin/i3blocks-timur` for i3blocks in a terminal and check the error. Also check your bar config paths |
+| i3: the icon appears as a box                                           | Install `ttf-nerd-fonts-symbols` and add it as a polybar font, or set `TIMUR_BAR_ICON`                                                            |
+| `cat … >> config.ini` freezes                                           | `cat` is probably aliased in your shell. Press `Ctrl+C`, remove any unwanted lines added to the config, and use `command cat`                     |
+| Running `cat … >> config.ini` freezes                                   | `cat` is probably aliased in your shell. Press `Ctrl+C`, remove any unwanted lines added to the config, and use `command cat`                     |
+
+## How it works
+
+The basic flow is:
+
+```text
+bin/timur-bar
+    │
+    │ talks to Timur using your saved login
+    │
+    │ runs every 5 minutes using a systemd user timer
+    │
+    ▼
+~/.cache/timur-bar/state.json
+    │
+    ├── Omarchy:
+    │     BarWidget.qml
+    │     Panel.qml
+    │
+    └── i3:
+          timur-bar bar
+          i3/timur-panel
+          i3/timur-menu
+```
+
+The important idea is:
+
+* `timur-bar` is the part that communicates with Timur.
+* It gets fresh data every 5 minutes.
+* The data is saved in `state.json`.
+* The bar and panels read that cached data.
+* When you want to save something, the UI calls `timur-bar`.
+* This means Omarchy and i3 use the same backend logic.
+
+### Important files
+
+| File or folder                  | What's inside                                                  |
+| ------------------------------- | -------------------------------------------------------------- |
+| `~/.config/timur-bar/session`   | Your saved Timur login. Private and protected with `chmod 600` |
+| `~/.cache/timur-bar/state.json` | Cached tasks, time entries, and journal data                   |
+| `~/.cache/timur-bar/log`        | Log of save attempts and their results                         |
 
 ## Commands
 
 ```bash
-timur-bar refresh                         # fetch now
-timur-bar set-session [--window]          # connect / refresh the session
-timur-bar bar [--polybar|--i3blocks]      # bar text from cache (no network)
+timur-bar refresh
+# Get fresh data from Timur now
+
+timur-bar set-session [--window]
+# Connect or renew your Timur login
+# --window opens the session setup in a new terminal
+
+timur-bar bar [--polybar|--i3blocks]
+# Print the bar text using cached data
+# Does not make a network request
+
 timur-bar add-entry '{"date":"2026-10-08","task":"117","type":"DEVELOPMENT","status":"DONE","duration":90,"description":"…"}'
+# Add a time entry
+
 timur-bar update-entry '{"clientId":"01…","description":"…"}'
+# Update an existing time entry
+
 timur-bar delete-entry <clientId> [date]
+# Delete a time entry
+
 timur-bar add-note <date> "text"
-tail -n 5 ~/.cache/timur-bar/log | jq .   # every save attempt and its result
+# Add a journal note
+
+timur-panel [journal] [--yesterday]
+# i3: open or close the Timur panel
+
+timur-menu [log|note|entries]
+# i3: open the rofi menus
+
+tail -n 5 ~/.cache/timur-bar/log | jq .
+# Show the last 5 save attempts
 ```
 
-## Troubleshooting
+For commands that use time entries:
 
-| Symptom | Fix |
-|---|---|
-| `󰔟 !` / "Not connected" | Session missing or expired → `timur-bar set-session` |
-| Connected check says not logged in | Copy the **Value** of `__Secure-timur-PROD-sessionid`, not another row |
-| "Something unexpected has occurred" | Server-side error. Check `~/.cache/timur-bar/log` for the request |
-| "Invalid pk … does not exist" | That task is no longer active. Refresh and pick again |
-| Omarchy panel shows old behaviour after editing | `omarchy restart shell` |
-| i3: no notifications from timers | Make sure the `import-environment` line from `i3/i3.config` is in your i3 config, and that `dunst` is running |
-| i3: module shows nothing / clicks do nothing | Run `~/.local/bin/i3blocks-timur` or `timur-bar bar` in a terminal to see the error. Check the paths in your bar config |
-| i3: icon shows as a box | Install `ttf-nerd-fonts-symbols` and add it as a polybar font, or set `TIMUR_BAR_ICON` |
+* `duration` is in **minutes**.
+* `date` must use this format:
+
+  ```text
+  YYYY-MM-DD
+  ```
+
+### Optional settings
+
+Add these variables to:
+
+```text
+~/.profile
+```
+
+| Variable             | Default              | What it changes                                                    |
+| -------------------- | -------------------- | ------------------------------------------------------------------ |
+| `TIMUR_BAR_ICON`     | `󰔟`                 | Icon or text shown before the logged time                          |
+| `TIMUR_PANEL_OFFSET` | `30`                 | i3: distance in pixels between the top of the screen and the panel |
+| `TERMINAL`           | First terminal found | Terminal used by `set-session --window`                            |
 
 ## Notes for maintainers
 
-- The GraphQL operations are the web app's own: `Me`, `Enums` (`allActiveTasks`), `MyTimeEntries`, `Note`, `UpdateNote` and `CudTimeEntry`.
-- `CudTimeEntry` matches **updates and deletes by `clientId`**, limited to your own entries.
-- New entries need a **ULID** `clientId`, because the column holds at most 26 characters.
-- Cookie names come from `toggle-corp/timur-backend` `main/settings.py`.
-- Timur's nightly job **moves TODO entries** from past days to today.
+* The GraphQL operations used by `timur-bar` are the same operations used by the Timur web app:
 
-## Uninstall
+  * `Me`
+  * `Enums` (`allActiveTasks`)
+  * `MyTimeEntries`
+  * `Note`
+  * `UpdateNote`
+  * `CudTimeEntry`
 
-```bash
-~/Projects/timur-bar/uninstall.sh            # keeps your session
-~/Projects/timur-bar/uninstall.sh --purge    # also removes session and cache
-```
+* `CudTimeEntry` uses **`clientId`** to update and delete entries.
+
+* Users can only update or delete their own entries.
+
+* New entries need a **ULID** as the `clientId` because the database column supports a maximum of 26 characters.
+
+* Cookie names come from:
+
+  ```text
+  toggle-corp/timur-backend
+  main/settings.py
+  ```
+
+* Timur's nightly job moves **TODO entries from previous days to today**.
+
+* The Omarchy panel and i3 panel are two versions of the same panel:
+
+  ```text
+  Panel.qml
+  i3/timur-panel
+  ```
+
+  If you change one, make the same change in the other.
 
 ## License
 
