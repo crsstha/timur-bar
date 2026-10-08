@@ -30,37 +30,111 @@ Both front ends read the same cached state and call the same script to save, so 
 - **i3:** `rofi`, a notification daemon (`dunst`), and `polybar` or `i3blocks`
 - A Timur account you can log into in the browser
 
-## Install
+## Install on Omarchy
 
-### Omarchy
+**1. Get the code** (either way works):
 
 ```bash
+# a) git clone — keep it wherever you like
 git clone https://github.com/crsstha/timur-bar.git ~/Projects/timur-bar
-~/Projects/timur-bar/install.sh
-```
+cd ~/Projects/timur-bar
 
-Or with Omarchy's plugin manager, which also gives you `omarchy plugin update`:
-
-```bash
+# b) Omarchy's plugin manager — clones into ~/.config/omarchy/plugins/crsstha.timur
+#    and lets you update later with `omarchy plugin update`
 omarchy plugin add https://github.com/crsstha/timur-bar.git --enable
-~/.config/omarchy/plugins/crsstha.timur/install.sh
+cd ~/.config/omarchy/plugins/crsstha.timur
 ```
 
-`install.sh` links the script, starts the refresh timer, adds the plugin to the bar (right side), adds the keybindings, and asks for your session.
-
-### i3
+**2. Run the installer:**
 
 ```bash
-sudo pacman -S rofi dunst polybar        # or i3blocks instead of polybar
-git clone https://github.com/crsstha/timur-bar.git ~/Projects/timur-bar
-~/Projects/timur-bar/install.sh          # auto-detects i3; or pass --i3
+./install.sh
 ```
 
-Then add the bar module. `install.sh` prints the paths:
-- **polybar:** paste `i3/polybar.ini` into your config and add `timur` to `modules-right`.
-- **i3blocks:** paste `i3/i3blocks.conf` into `~/.config/i3blocks/config`.
+It:
+- links `bin/timur-bar` to `~/.local/bin`;
+- starts the 5-minute refresh timer;
+- puts the widget on the right of the bar;
+- adds `Super+Alt+T` / `Super+Alt+J` to `~/.config/hypr/bindings.lua`.
 
-Reload i3 with `$mod+Shift+r`.
+**3. Connect your Timur session.** The installer asks for this on first run; see [Connect your session](#connect-your-session).
+
+**4. Check it works:**
+- The bar shows `󰔟 0m` (or your logged time). If you don't see it, run `omarchy restart shell`.
+- `Super+Alt+T` opens the panel.
+- `timur-bar refresh` prints `{"ok": true}`.
+
+## Install on i3 (Arch Linux)
+
+**1. Install the dependencies:**
+
+```bash
+sudo pacman -S --needed git python rofi dunst libnotify xdg-utils alacritty ttf-nerd-fonts-symbols
+sudo pacman -S --needed polybar      # or: i3blocks
+```
+
+`ttf-nerd-fonts-symbols` provides the `󰔟` icon. To use plain text instead, set `export TIMUR_BAR_ICON="T:"` in `~/.profile`.
+
+**2. Get the code and run the installer:**
+
+```bash
+git clone https://github.com/crsstha/timur-bar.git ~/Projects/timur-bar
+cd ~/Projects/timur-bar
+./install.sh --i3
+```
+
+It:
+- links `timur-bar`, `timur-menu` and `i3blocks-timur` into `~/.local/bin`;
+- starts the refresh timer;
+- appends a marked block to `~/.config/i3/config`, with the keybindings and an `import-environment` line so the timers can send notifications.
+
+**3. Make sure notifications work.** If `dunst` isn't started anywhere yet, add this to `~/.config/i3/config`:
+
+```
+exec --no-startup-id dunst
+```
+
+**4. Add the module to your bar.** Choose **one**:
+
+<details open><summary><b>polybar</b></summary>
+
+1. Append the module to your polybar config:
+   ```bash
+   cat ~/Projects/timur-bar/i3/polybar.ini >> ~/.config/polybar/config.ini
+   ```
+2. In your `[bar/…]` section, add `timur` to a modules list, and make sure a font has the icon:
+   ```ini
+   modules-right = timur date
+   font-1 = "Symbols Nerd Font:size=11"
+   ```
+3. Restart polybar, e.g. `polybar-msg cmd restart` or your launch script.
+
+</details>
+
+<details><summary><b>i3blocks</b></summary>
+
+1. Append the block:
+   ```bash
+   mkdir -p ~/.config/i3blocks
+   cat ~/Projects/timur-bar/i3/i3blocks.conf >> ~/.config/i3blocks/config
+   ```
+2. Make sure i3's bar uses i3blocks, in `~/.config/i3/config`:
+   ```
+   bar {
+       status_command i3blocks
+   }
+   ```
+
+</details>
+
+**5. Reload i3** with `$mod+Shift+r`.
+
+**6. Connect your Timur session.** The installer asks on first run, or run `timur-bar set-session`. See [Connect your session](#connect-your-session).
+
+**7. Check it works:**
+- `timur-bar bar` prints e.g. `󰔟 0m`.
+- The bar shows the same text, and left-clicking it opens the rofi menu.
+- `$mod+Alt+t` asks for a task.
 
 ## Connect your session
 
@@ -75,9 +149,17 @@ Timur signs in with Google and has no API keys, so `timur-bar` reuses your brows
    | `__Secure-timur-PROD-sessionid` | your login session |
    | `timur-PROD-csrftoken` | CSRF token |
 
-It's saved to `~/.config/timur-bar/session` (`chmod 600`). Sessions last about a month, and the bar shows `•` three days before expiry.
+It's saved to `~/.config/timur-bar/session` (`chmod 600`). Sessions last about a month, and the bar shows `•` three days before expiry. To renew, run `timur-bar set-session` again.
 
 > ⚠ The session cookie is as good as your password for Timur. Never commit or share it.
+
+## Update
+
+```bash
+cd ~/Projects/timur-bar && git pull     # or: omarchy plugin update crsstha.timur
+./install.sh                             # safe to re-run; picks up new files
+omarchy restart shell                    # Omarchy only, to reload the panel
+```
 
 ## Usage
 
@@ -128,6 +210,8 @@ tail -n 5 ~/.cache/timur-bar/log | jq .   # every save attempt and its result
 | "Invalid pk … does not exist" | That task is no longer active. Refresh and pick again |
 | Omarchy panel shows old behaviour after editing | `omarchy restart shell` |
 | i3: no notifications from timers | Make sure the `import-environment` line from `i3/i3.config` is in your i3 config, and that `dunst` is running |
+| i3: module shows nothing / clicks do nothing | Run `~/.local/bin/i3blocks-timur` or `timur-bar bar` in a terminal to see the error. Check the paths in your bar config |
+| i3: icon shows as a box | Install `ttf-nerd-fonts-symbols` and add it as a polybar font, or set `TIMUR_BAR_ICON` |
 
 ## Notes for maintainers
 
