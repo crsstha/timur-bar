@@ -29,6 +29,7 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 STATE = Path.home() / ".cache/timur-bar/state.json"
+WEB_APP = "https://timur.dev.togglecorp.com/"
 WIDTH = 520
 MAX_TASK_ROWS = 4
 EXPIRY_WARN_DAYS = 3
@@ -185,6 +186,10 @@ class Panel(Gtk.ApplicationWindow):
 
         header = Gtk.Box(spacing=8)
         header.pack_start(label("Timur", "title"), False, False, 0)
+        web = Gtk.Button(label="Web ↗", tooltip_text="Open Timur in the browser")
+        web.get_style_context().add_class("flat")
+        web.connect("clicked", self.open_web_app)
+        header.pack_start(web, False, False, 0)
         self.day_picker, self.day_buttons = toggle_group([(-1, "Yesterday"), (0, "Today")], self.set_day)
         self.day_buttons[0].set_active(True)
         header.pack_end(self.day_picker, False, False, 0)
@@ -655,6 +660,10 @@ class Panel(Gtk.ApplicationWindow):
         text = self.note_field.get_text().strip()
         if not self.busy and text:
             self.run_cli(["add-note", self.day_iso, text], "note")
+
+    def open_web_app(self, *args):
+        subprocess.Popen(["xdg-open", WEB_APP], start_new_session=True)
+        self.hide()
 
     def paste_session(self, *args):
         subprocess.Popen([CLI, "set-session", "--window"], start_new_session=True)
