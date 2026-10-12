@@ -9,8 +9,8 @@ import qs.Ui
 // reads its state.json and runs it for saves.
 Panel {
   id: root
-  moduleName: "crsstha.timur"
-  ipcTarget: "crsstha.timur"
+  moduleName: "togglecorp.timur"
+  ipcTarget: "togglecorp.timur"
   manageIpc: false
 
   property var anchorItem: null

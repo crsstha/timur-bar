@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Timur (timesheet) from the desktop bar — shared core for the Omarchy
-plugin (crsstha.timur) and the i3 front end (polybar / i3blocks + rofi).
+plugin (togglecorp.timur) and the i3 front end (polybar / i3blocks + rofi).
 
   timur-bar refresh [--date YYYY-MM-DD]   Fetch entries, tasks, journal -> state.json
   timur-bar add-entry '<json>'            Create a time entry, then refresh
