@@ -17,12 +17,13 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
-  // The script ships inside the plugin folder (bin/timur-bar).
-  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/timur-bar")).replace(/^file:\/\//, ""))
+  // The script ships inside the plugin folder (bin/timur-bar, one level up).
+  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("../bin/timur-bar")).replace(/^file:\/\//, ""))
   readonly property int nudgeHour: 17
   readonly property int nudgeMinutes: 120
   readonly property int expiryWarnDays: 3
   readonly property int maxTaskRows: 4
+  readonly property string webApp: "https://timur.dev.togglecorp.com/"
 
   // ---- data from state.json
   property var data: ({})
@@ -213,9 +214,25 @@ Panel {
     runCli(["delete-entry", entry.clientId, root.dayIso], true, "delete")
   }
 
+  // Log the same work again today (task, type, status, duration, description).
+  function copyToToday(entry) {
+    root.confirmDeleteId = ""
+    root.pendingSummary = root.formatMinutes(entry.duration) + " · " + entry.task
+    var fields = {
+      date: root.todayIso, task: String(entry.taskId), type: entry.type || defaultType(),
+      status: entry.status || "DONE", duration: entry.duration, description: entry.description || ""
+    }
+    runCli(["add-entry", JSON.stringify(fields)], true, "copy")
+  }
+
   function addNote() {
     if (busy || noteText.trim() === "") return
     runCli(["add-note", root.dayIso, root.noteText.trim()], true, "note")
+  }
+
+  function openWebApp() {
+    Quickshell.execDetached(["omarchy-launch-or-focus-webapp", "timur.dev.togglecorp.com", root.webApp])
+    root.close()
   }
 
   function pasteSession() {
@@ -275,6 +292,9 @@ Panel {
     } else if (action === "delete") {
       showMessage("✓ Deleted " + root.pendingSummary, "ok")
       Quickshell.execDetached(["notify-send", "--app-name=Timur", "--icon=edit-delete", "Timur", "Deleted " + root.pendingSummary])
+    } else if (action === "copy") {
+      showMessage("✓ Copied " + root.pendingSummary + " to today", "ok")
+      Quickshell.execDetached(["notify-send", "--app-name=Timur", "--icon=appointment-new", "Timur", "Copied " + root.pendingSummary + " to today"])
     } else if (action === "note") {
       showMessage("✓ Added to " + (root.dayOffset === 0 ? "today's" : "yesterday's") + " journal", "ok")
       root.noteText = ""
@@ -396,6 +416,15 @@ Panel {
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.title
               font.bold: true
+            }
+            Button {
+              anchors.left: heading.right
+              anchors.leftMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Web ↗"
+              tooltipText: "Open Timur in the browser"
+              foreground: root.bar.foreground
+              onClicked: root.openWebApp()
             }
             Text {
               textFormat: Text.PlainText
@@ -771,6 +800,14 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(4)
 
+                  Button {
+                    visible: !entryRow.confirming && root.dayOffset === -1 && !!entryRow.modelData.taskId
+                    text: "→ Today"
+                    tooltipText: "Copy this entry to today"
+                    fontSize: Style.font.bodySmall
+                    foreground: root.bar.foreground
+                    onClicked: root.copyToToday(entryRow.modelData)
+                  }
                   Button {
                     visible: !entryRow.confirming
                     text: "Edit"

@@ -76,7 +76,7 @@ BarWidget {
 
     onPressed: function(b) {
       if (!root.bar) return
-      if (b === Qt.RightButton) root.bar.run("omarchy-launch-or-focus-webapp Timur 'https://timur.dev.togglecorp.com/'")
+      if (b === Qt.RightButton) root.bar.run("omarchy-launch-or-focus-webapp timur.dev.togglecorp.com 'https://timur.dev.togglecorp.com/'")
       else if (b === Qt.MiddleButton) root.refresh()
       else root.togglePanel()
     }

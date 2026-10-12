@@ -36,7 +36,7 @@ STATE = CACHE / "state.json"
 RECENT_DAYS = 7
 
 
-# Bar text (i3 front end). The Omarchy panel computes the same in Panel.qml.
+# Bar text (i3 front end). The Omarchy panel computes the same in omarchy/Panel.qml.
 BAR_ICON = os.environ.get("TIMUR_BAR_ICON", "󰔟")
 NUDGE_HOUR, NUDGE_MINUTES, EXPIRY_WARN_DAYS = 17, 120, 3
 COLOR_URGENT, COLOR_DIM = os.environ.get("TIMUR_BAR_URGENT", "#e06c75"), os.environ.get("TIMUR_BAR_DIM", "#7f848e")
@@ -355,7 +355,7 @@ def format_minutes(minutes):
 
 
 def bar_text(style):
-    """Pill text for polybar/i3blocks; mirrors the label logic in Panel.qml."""
+    """Pill text for polybar/i3blocks; mirrors the label logic in omarchy/Panel.qml."""
     state = read_json(STATE, {})
     now = dt.datetime.now().astimezone()
     today = (state.get("days") or {}).get(now.date().isoformat())
