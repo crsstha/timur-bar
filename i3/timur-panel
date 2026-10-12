@@ -7,7 +7,7 @@
 
 One instance: running it again toggles the open window. It reads
 ~/.cache/timur-bar/state.json and runs `timur-bar` for every change, like
-Panel.qml. Needs python-gobject and gtk3.
+omarchy/Panel.qml. Needs python-gobject and gtk3.
 
   TIMUR_PANEL_OFFSET  pixels between the top of the monitor and the panel (bar height, default 30)
 """
@@ -483,6 +483,8 @@ class Panel(Gtk.ApplicationWindow):
                            ("Keep", lambda *a: self.set_confirm(""), "")] if confirming else \
                           [("Edit", lambda *a, e=entry: self.start_edit(e), ""),
                            ("Delete", lambda *a, c=cid: self.set_confirm(c), "urgent")]
+                if self.day_offset == -1 and entry.get("taskId") and not confirming:
+                    actions.insert(0, ("→ Today", lambda *a, e=entry: self.copy_to_today(e), ""))
                 for text, handler, cls in reversed(actions):  # pack_end fills right to left
                     button = Gtk.Button()
                     button.add(label(text, cls))
@@ -656,6 +658,15 @@ class Panel(Gtk.ApplicationWindow):
         summary = f"{format_minutes(entry.get('duration'))} · {entry.get('task')}"
         self.run_cli(["delete-entry", entry["clientId"], self.day_iso], "delete", summary)
 
+    def copy_to_today(self, entry):
+        """Log the same work again today (task, type, status, duration, description)."""
+        self.confirm_delete_id = ""
+        fields = {"date": iso(dt.date.today()), "task": str(entry["taskId"]),
+                  "type": entry.get("type") or self.default_type(), "status": entry.get("status") or "DONE",
+                  "duration": entry.get("duration"), "description": entry.get("description") or ""}
+        summary = f"{format_minutes(entry.get('duration'))} · {entry.get('task')}"
+        self.run_cli(["add-entry", json.dumps(fields)], "copy", summary)
+
     def add_note(self):
         text = self.note_field.get_text().strip()
         if not self.busy and text:
@@ -716,6 +727,9 @@ class Panel(Gtk.ApplicationWindow):
         elif action == "delete":
             notify(f"Deleted {summary}", "edit-delete")
             self.show_message(f"✓ Deleted {summary}", "ok")
+        elif action == "copy":
+            notify(f"Copied {summary} to today")
+            self.show_message(f"✓ Copied {summary} to today", "ok")
         elif action == "note":
             self.note_field.set_text("")
             self.render_journal_hint(f"✓ Added to {self.day_name.lower()}'s journal", "ok")

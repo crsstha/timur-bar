@@ -248,6 +248,8 @@ def edit_entry(ctx, entry):
             "✓ Save changes",
             "✗ Delete this entry",
         ]
+        if ctx.yesterday:
+            options.append("→ Copy to today")
         index = rofi("Edit entry", options, mesg=entry_line(entry))
         if index is None:
             return
@@ -277,6 +279,16 @@ def edit_entry(ctx, entry):
                     notify("Timur", f"Deleted {format_minutes(entry.get('duration'))} · {entry.get('task')}")
                 else:
                     notify("Timur — not deleted", result.get("error", "Unknown error"), urgent=True)
+            return
+        elif index == 7:
+            copy = {k: v for k, v in fields.items() if k != "clientId"}
+            copy["date"] = dt.date.today().isoformat()
+            result = run_cli("add-entry", json.dumps(copy))
+            summary = f"{format_minutes(copy['duration'])} · {ctx.task_label(copy['task']) or entry.get('task')}"
+            if result.get("ok"):
+                notify("Timur", f"Copied {summary} to today")
+            else:
+                notify("Timur — not copied", result.get("error", "Unknown error"), urgent=True)
             return
 
 

@@ -158,7 +158,7 @@ On i3, clicking the bar module opens **`timur-panel`**.
 
 It is a GTK version of the Omarchy panel and appears in the top-right corner of your screen.
 
-The Omarchy panel (`Panel.qml`) only works inside Omarchy, so i3 has its own GTK version.
+The Omarchy panel (`omarchy/Panel.qml`) only works inside Omarchy, so i3 has its own GTK version.
 
 The older **rofi** menus are also available.
 
@@ -825,8 +825,8 @@ bin/timur-bar
 ~/.cache/timur-bar/state.json
     │
     ├── Omarchy:
-    │     BarWidget.qml
-    │     Panel.qml
+    │     omarchy/BarWidget.qml
+    │     omarchy/Panel.qml
     │
     └── i3:
           timur-bar bar
@@ -939,7 +939,7 @@ Add these variables to:
 * The Omarchy panel and i3 panel are two versions of the same panel:
 
   ```text
-  Panel.qml
+  omarchy/Panel.qml
   i3/timur-panel
   ```
 
