@@ -36,6 +36,12 @@ fi
 remove_block "$HOME/.config/hypr/bindings.lua"
 remove_block "$HOME/.config/i3/config"
 
+if command -v gnome-extensions >/dev/null 2>&1; then
+  gnome-extensions disable timur-bar@crsstha >/dev/null 2>&1 || true
+  unlink_if_ours "$HOME/.local/share/gnome-shell/extensions/timur-bar@crsstha"
+  "$REPO/gnome/keybindings.py" remove >/dev/null 2>&1 && echo "    removed GNOME keyboard shortcuts" || true
+fi
+
 if (( purge )); then
   rm -rf "$HOME/.config/timur-bar" "$HOME/.cache/timur-bar"
   echo "    removed session and cache"

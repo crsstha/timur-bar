@@ -1,0 +1,7 @@
+{
+  "uuid": "timur-bar@crsstha",
+  "name": "Timur",
+  "description": "Today's logged Timur time in the top bar. Click it to open the time-entry and journal panel (timur-panel). Data comes from timur-bar.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "url": "https://github.com/crsstha/timur-bar"
+}

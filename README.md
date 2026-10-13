@@ -28,6 +28,7 @@ It shows how much time you have logged today in the top bar. Click the time to o
 * [Before you start](#before-you-start)
 * [Install on Omarchy](#install-on-omarchy)
 * [Install on i3 (Arch Linux)](#install-on-i3-arch-linux)
+* [Install on GNOME (Ubuntu)](#install-on-gnome-ubuntu)
 * [Connect your Timur account](#connect-your-timur-account)
 * [Everyday use](#everyday-use)
 * [Setting it up for someone else / on another computer](#setting-it-up-for-someone-else--on-another-computer)
@@ -40,8 +41,9 @@ It shows how much time you have logged today in the top bar. Click the time to o
 | --------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------ |
 | **Omarchy** (Hyprland)                  | A widget in the Omarchy bar that opens the Timur panel                          | [Install on Omarchy](#install-on-omarchy)  |
 | **i3** with **polybar** or **i3blocks** | A bar module that opens the same panel in the top-right corner, plus rofi menus | [Install on i3](#install-on-i3-arch-linux) |
+| **GNOME** (Ubuntu's default desktop)    | A GNOME Shell extension in the top bar that opens the i3 panel under it         | [Install on GNOME](#install-on-gnome-ubuntu) |
 
-Both versions work in the same way. They use the same script to communicate with Timur.
+All versions work in the same way. They use the same script to communicate with Timur.
 
 ## Before you start
 
@@ -441,6 +443,77 @@ Change `30` to your actual bar height.
 
 Then log out and log back in.
 
+## Install on GNOME (Ubuntu)
+
+On GNOME, a small GNOME Shell extension shows your logged time on the right of the top bar.
+
+Clicking it opens **`timur-panel`**, the same GTK panel that i3 uses, just under the top bar.
+
+It works on Wayland and X11, and on GNOME Shell 45 to 50 (Ubuntu 24.04 and newer).
+
+### 1. Install the required packages
+
+```bash
+sudo apt install git python3 python3-gi gir1.2-gtk-3.0 libnotify-bin xdg-utils
+```
+
+`rofi` is optional. Install it if you also want the one-line quick log (`Super+Alt+q`) and the rofi menus.
+
+You do **not** need a Nerd Font on GNOME. The extension uses a normal GNOME icon.
+
+### 2. Get the code and run the installer
+
+```bash
+git clone https://github.com/crsstha/timur-bar.git ~/Projects/timur-bar
+
+cd ~/Projects/timur-bar
+
+./install.sh --gnome
+```
+
+The installer will:
+
+* Add `timur-bar`, `timur-panel` and `timur-menu` to `~/.local/bin`.
+* Enable the 5-minute refresh timer and the end-of-day reminder.
+* Link the extension to `~/.local/share/gnome-shell/extensions/timur-bar@crsstha` and enable it.
+* Add these shortcuts under **Settings → Keyboard → Custom Shortcuts**:
+
+  * `Super+Alt+t`: log time
+  * `Super+Alt+j`: journal note
+  * `Super+Alt+q`: quick log (only if `rofi` is installed)
+
+Use `./install.sh --gnome --no-bindings` if you don't want the shortcuts.
+
+### 3. Log out and log back in
+
+On Wayland, GNOME only loads new extensions when you log in.
+
+After logging in again, you should see the clock icon and `0m` (or your logged time) on the right of the top bar.
+
+If it does not appear, run:
+
+```bash
+gnome-extensions info timur-bar@crsstha
+```
+
+and check that its state is `ENABLED`. You can also turn it on in the **Extensions** app.
+
+### 4. Connect your Timur account
+
+The installer asks for your Timur login the first time.
+
+See [Connect your Timur account](#connect-your-timur-account).
+
+### Using it on GNOME
+
+| Action         | What it does                     |
+| -------------- | -------------------------------- |
+| Left-click     | Open or close the panel          |
+| Right-click    | Open the panel on the Journal tab |
+| Middle-click   | Refresh now                      |
+
+Everything inside the panel works as on i3. See [Everyday use](#everyday-use).
+
 ## Connect your Timur account
 
 Timur uses Google login and does not provide API keys.
@@ -540,6 +613,8 @@ timur-bar set-session
 > * Send them to someone else.
 
 ## Everyday use
+
+GNOME uses the same panel as i3, so the **i3** column applies to GNOME as well. On GNOME, scrolling on the top-bar item does nothing; use the **Web ↗** button and `timur-menu` instead.
 
 | To…                     | Omarchy                                     | i3                                                                                                        |
 | ----------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -797,6 +872,7 @@ The uninstall script:
   * `~/.config/i3/config`
   * `~/.config/hypr/bindings.lua`
 * Removes the Omarchy plugin.
+* Disables and removes the GNOME extension and its keyboard shortcuts.
 
 It **does not** modify your polybar or i3blocks config.
 
@@ -840,10 +916,14 @@ bin/timur-bar
     │     omarchy/BarWidget.qml
     │     omarchy/Panel.qml
     │
-    └── i3:
-          timur-bar bar
+    ├── i3:
+    │     timur-bar bar
+    │     i3/timur-panel
+    │     i3/timur-menu
+    │
+    └── GNOME:
+          gnome/timur-bar@crsstha/extension.js  (runs timur-bar bar --json)
           i3/timur-panel
-          i3/timur-menu
 ```
 
 The important idea is:
@@ -853,7 +933,7 @@ The important idea is:
 * The data is saved in `state.json`.
 * The bar and panels read that cached data.
 * When you want to save something, the UI calls `timur-bar`.
-* This means Omarchy and i3 use the same backend logic.
+* This means Omarchy, i3 and GNOME use the same backend logic.
 
 ### Important files
 
@@ -873,7 +953,7 @@ timur-bar set-session [--window]
 # Connect or renew your Timur login
 # --window opens the session setup in a new terminal
 
-timur-bar bar [--polybar|--i3blocks]
+timur-bar bar [--polybar|--i3blocks|--json]
 # Print the bar text using cached data
 # Does not make a network request
 
@@ -890,7 +970,7 @@ timur-bar add-note <date> "text"
 # Add a journal note
 
 timur-panel [journal] [--yesterday]
-# i3: open or close the Timur panel
+# i3 and GNOME: open or close the Timur panel
 
 timur-menu [log|note|entries]
 # i3: open the rofi menus
@@ -919,7 +999,7 @@ Add these variables to:
 | Variable             | Default              | What it changes                                                    |
 | -------------------- | -------------------- | ------------------------------------------------------------------ |
 | `TIMUR_BAR_ICON`     | `󰔟`                 | Icon or text shown before the logged time                          |
-| `TIMUR_PANEL_OFFSET` | `30`                 | i3: distance in pixels between the top of the screen and the panel |
+| `TIMUR_PANEL_OFFSET` | `30`                 | i3 (not GNOME, where the extension places the panel): distance in pixels between the top of the screen and the panel |
 | `TIMUR_WEEK_TARGET`  | `40`                 | i3: weekly hours target shown in the panel's week strip            |
 | `TIMUR_REMIND_HOUR`    | `17`               | earliest hour for the reminder (set it in `~/.config/environment.d/timur.conf`, it runs from systemd) |
 | `TIMUR_REMIND_MINUTES` | `120`              | no reminder once this many minutes are logged today            |
