@@ -38,7 +38,15 @@ Panel {
   readonly property bool expiringSoon: !needsSession && expiryDays < expiryWarnDays
   readonly property bool nudge: !needsSession && hasData && now.getHours() >= nudgeHour && todayMinutes < nudgeMinutes
 
-  readonly property string label: needsSession ? "󰔟 !" : "󰔟 " + (hasData ? formatMinutes(todayMinutes) : "…") + (expiringSoon ? " •" : "")
+  // ---- ▶ timer (~/.cache/timur-bar/timer.json, managed by `timur-bar timer`, shared with the i3 panel)
+  property var timer: null
+  readonly property bool timerPaused: !!(timer && timer.pausedAt)
+  readonly property real timerSeconds: timer
+    ? Math.max(0, (timer.pausedAt || now.getTime() / 1000) - timer.started - (timer.pausedSeconds || 0)) : 0
+  readonly property string timerText: timer ? (timerPaused ? "⏸ " : "▶ ") + formatClock(timerSeconds) : ""
+
+  readonly property string label: (needsSession ? "󰔟 !" : "󰔟 " + (hasData ? formatMinutes(todayMinutes) : "…") + (expiringSoon ? " •" : ""))
+    + (timer ? "  " + timerText : "")
 
   // ---- form state
   property string tab: "entry"          // "entry" | "journal"
@@ -104,6 +112,11 @@ Panel {
   }
 
   // Hours by default: 1 · 1.5 · .5 · 2h · 1h30 · 1:30; minutes only with "m": 45m  →  minutes (0 if invalid)
+  function formatClock(seconds) {
+    var m = Math.floor(seconds / 60)
+    return Math.floor(m / 60) + ":" + (m % 60 < 10 ? "0" : "") + (m % 60)
+  }
+
   function parseDuration(text) {
     var minutes = parseDurationRaw(text)
     return minutes > 0 && minutes <= 24 * 60 ? minutes : 0  // over a day is surely a typo
@@ -225,6 +238,53 @@ Panel {
     runCli(["add-entry", JSON.stringify(fields)], true, "copy")
   }
 
+  // Timer commands are local file updates in timur-bar; they don't share the save Process.
+  property string timerAction: ""
+  function runTimer(args) {
+    if (timerProc.running) return
+    root.timerAction = args[0]
+    timerProc.command = [root.cli, "timer"].concat(args)
+    timerProc.running = true
+  }
+
+  function startTimer() {
+    if (root.selectedTaskId === "" || root.timer) return
+    runTimer(["start", JSON.stringify({ task: root.selectedTaskId, label: root.selectedTaskLabel,
+                                        type: root.entryType, description: root.description.trim() })])
+  }
+
+  function finishTimer(output) {
+    var result = {}
+    try { result = JSON.parse(String(output).trim().split("\n").pop() || "{}") }
+    catch (e) { result = { ok: false, error: "Unexpected output from timur-bar" } }
+    if (!result.ok) { showMessage(result.error || "Timer failed", "error"); timerFile.reload(); return }
+    var t = result.timer
+    if (root.timerAction === "stop") {
+      // Fill the form (duration rounded to the minute) so it can be checked and saved.
+      root.timer = null
+      cancelEdit()
+      root.dayOffset = 0
+      root.selectedTaskId = String(t.task)
+      root.entryType = t.type || defaultType()
+      root.entryStatus = "DONE"
+      root.durationText = formatMinutes(t.minutes)
+      root.description = t.description || ""
+      showMessage("■ Stopped at " + formatMinutes(t.minutes) + " — add a description and Save", "")
+      descriptionField.forceActiveFocus()
+    } else if (root.timerAction === "discard") {
+      root.timer = null
+      showMessage("Timer discarded", "")
+    } else {
+      root.timer = t
+      if (root.timerAction === "start") {
+        root.selectedTaskId = ""
+        root.description = ""
+        root.durationText = ""
+        showMessage("▶ Timer started — it keeps running with the panel closed", "ok")
+      }
+    }
+  }
+
   function addNote() {
     if (busy || noteText.trim() === "") return
     runCli(["add-note", root.dayIso, root.noteText.trim()], true, "note")
@@ -311,6 +371,37 @@ Panel {
     onExited: root.finishCli(procOut.text)
   }
 
+  Process {
+    id: timerProc
+    stdout: StdioCollector {
+      id: timerOut
+      waitForEnd: true
+    }
+    onExited: root.finishTimer(timerOut.text)
+  }
+
+  FileView {
+    id: timerFile
+    path: Quickshell.env("HOME") + "/.cache/timur-bar/timer.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      var t = null
+      try { t = JSON.parse(text()) } catch (e) {}
+      root.timer = t && t.started ? t : null
+    }
+    onLoadFailed: root.timer = null
+  }
+
+  // Ticks the clock on the bar and in the panel while the timer runs.
+  Timer {
+    interval: 1000
+    running: !!root.timer && !root.timerPaused
+    repeat: true
+    onTriggered: root.now = new Date()
+  }
+
   FileView {
     id: stateFile
     path: Quickshell.env("HOME") + "/.cache/timur-bar/state.json"
@@ -331,6 +422,7 @@ Panel {
     onTriggered: {
       root.now = new Date()
       stateFile.reload()
+      timerFile.reload()
     }
   }
 
@@ -507,6 +599,58 @@ Panel {
             visible: root.hasData && root.tab === "entry"
             width: parent.width
             spacing: Style.space(8)
+
+            Rectangle {
+              visible: !!root.timer
+              width: parent.width
+              height: timerButtons.implicitHeight + Style.space(8)
+              radius: Style.cornerRadius
+              color: Style.hoverFillFor(root.bar.foreground, Color.accent)
+
+              Text {
+                textFormat: Text.PlainText
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(8)
+                anchors.right: timerButtons.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                elide: Text.ElideMiddle
+                text: root.timer ? root.timerText + "  ·  " + (root.timer.label || "?") : ""
+                color: Color.accent
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              Row {
+                id: timerButtons
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(4)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(4)
+
+                Button {
+                  text: root.timerPaused ? "▶ Resume" : "⏸ Pause"
+                  bordered: true
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  onClicked: root.runTimer([root.timerPaused ? "resume" : "pause"])
+                }
+                Button {
+                  text: "■ Stop"
+                  tooltipText: "Stop and fill in the duration"
+                  bordered: true
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  onClicked: root.runTimer(["stop"])
+                }
+                Button {
+                  text: "✕"
+                  tooltipText: "Discard the timer"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  onClicked: root.runTimer(["discard"])
+                }
+              }
+            }
 
             Rectangle {
               visible: root.editing
@@ -694,7 +838,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 anchors.left: parent.left
-                anchors.right: root.editing ? cancelEditButton.left : saveButton.left
+                anchors.right: root.editing ? cancelEditButton.left : (startTimerButton.visible ? startTimerButton.left : saveButton.left)
                 anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 wrapMode: Text.WordWrap
@@ -713,6 +857,18 @@ Panel {
                 enabled: !root.busy
                 foreground: root.bar.foreground
                 onClicked: root.cancelEdit()
+              }
+              Button {
+                id: startTimerButton
+                visible: !root.editing && root.dayOffset === 0 && !root.timer
+                anchors.right: saveButton.left
+                anchors.rightMargin: Style.space(6)
+                text: "▶ Start timer"
+                tooltipText: "Time this task; the bar shows the clock while it runs"
+                bordered: true
+                enabled: !root.busy && root.selectedTaskId !== "" && root.entryType !== ""
+                foreground: root.bar.foreground
+                onClicked: root.startTimer()
               }
               Button {
                 id: saveButton
