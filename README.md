@@ -15,6 +15,8 @@ It shows how much time you have logged today in the top bar. Click the time to o
 
 󰔟 5h20 •    your Timur session expires within 3 days
 
+󰔟 5h20 · 2 todo   i3: two of today's entries are still TODO/DOING
+
 󰔟 !         not connected, or your session has expired
 ```
 
@@ -183,7 +185,7 @@ sudo pacman -S --needed i3blocks
 | `python-gobject`, `gtk3` | Used to create the Timur panel                   |
 | `rofi`                   | Provides the fallback menus                      |
 | `dunst`, `libnotify`     | Shows notifications such as "Logged 1h30 to …"   |
-| `xdg-utils`              | Opens Timur in your browser when you right-click |
+| `xdg-utils`              | Opens Timur in your browser (scroll down)        |
 | `ttf-nerd-fonts-symbols` | Provides the `󰔟` icon                           |
 
 If you do not want to use the `󰔟` icon, you can use another icon or text by adding this to `~/.profile`:
@@ -540,13 +542,15 @@ timur-bar set-session
 | To…                     | Omarchy                                     | i3                                                                                                        |
 | ----------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | Open the panel          | `Super+Alt+T` or left-click the widget      | `Super+Alt+t` or left-click the module                                                                    |
-| Add a journal note      | `Super+Alt+J`                               | `Super+Alt+j`                                                                                             |
+| Add a journal note      | `Super+Alt+J`                               | `Super+Alt+j` or right-click the module                                                                   |
 | Edit or delete an entry | Hover over the entry under **Logged today** | Click **Edit** or **Delete** next to the entry under **Logged today**. `Super+Alt+e` also opens the panel |
 | Save without clicking   | `Ctrl+Enter`                                | `Ctrl+Enter`                                                                                              |
 | Close the panel         | `Esc`                                       | `Esc`, or click somewhere else                                                                            |
-| Work on yesterday       | **Yesterday** button                        | **Yesterday** button                                                                                      |
+| Work on another day     | **Yesterday** button                        | **‹** / **›** buttons (`Ctrl+PgUp` / `Ctrl+PgDn`); click the day name (`Ctrl+Home`) to go back to today   |
+| Add a TODO              | —                                           | Set status to **TODO** (or DOING) and leave the duration empty                                            |
+| Finish a TODO           | —                                           | Click **✓ Done** next to it, enter the duration, **Update**                                               |
 | Refresh now             | Middle-click                                | Middle-click                                                                                              |
-| Open Timur in browser   | Right-click                                 | Right-click                                                                                               |
+| Open Timur in browser   | Right-click                                 | Scroll down on the module, or the **Web ↗** button in the panel                                           |
 | Use rofi menus          | —                                           | Scroll up on the module, or run `timur-menu`                                                              |
 
 ### Logging time
@@ -563,7 +567,8 @@ When logging time:
 
    * Arrow keys + `Enter`, or
    * Mouse click.
-4. Enter the duration.
+4. Enter the duration, or click one of **15m 30m 1h 2h 4h**.
+   On i3, a **TODO** or **DOING** entry doesn't need a duration — leave it empty and click **Add TODO**.
 5. Enter a description.
 6. Click **Save**.
 

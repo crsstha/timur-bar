@@ -144,12 +144,17 @@ def pick_task(ctx, prompt="Task", current=None):
     return None if index is None else str(tasks[index]["id"])
 
 
-def ask_duration(prefill=None):
+def ask_duration(prefill=None, optional=False):
+    """Minutes, None on Esc. optional: an empty answer returns 0 (a TODO/DOING entry without time)."""
     mesg = "Hours: 1 · 1.5 · 0.25 · 1h30 · 1:30 — or minutes with m: 45m"
+    if optional:
+        mesg += "\nLeave empty to add it as a TODO"
     while True:
         text = rofi("Hours", text_input=True, mesg=mesg, prefill=prefill)
         if text is None:
             return None
+        if optional and not text.strip():
+            return 0
         minutes = parse_duration(text)
         if minutes:
             return minutes
@@ -164,9 +169,9 @@ def pick_type(ctx, preferred=None):
     return None if index is None else types[index]["key"]
 
 
-def pick_status(current="DONE"):
-    index = rofi("Status", STATUS_ORDER, selected=STATUS_ORDER.index(current) if current in STATUS_ORDER else 0)
-    return None if index is None else STATUS_ORDER[index]
+def pick_status(current="DONE", options=STATUS_ORDER):
+    index = rofi("Status", options, selected=options.index(current) if current in options else 0)
+    return None if index is None else options[index]
 
 
 # ---------------------------------------------------------------- flows
@@ -175,24 +180,26 @@ def log_time(ctx):
     task = pick_task(ctx, f"Log time · {ctx.day_name}")
     if task is None:
         return
-    minutes = ask_duration()
+    minutes = ask_duration(optional=True)
     if minutes is None:
         return
-    description = rofi("Description", text_input=True, mesg=f"{ctx.task_label(task)} · {format_minutes(minutes)}")
+    description = rofi("Description", text_input=True,
+                       mesg=f"{ctx.task_label(task)} · {format_minutes(minutes) if minutes else 'no time yet'}")
     if description is None:
         return
     entry_type = pick_type(ctx, (ctx.state.get("lastTypeByTask") or {}).get(task))
     if entry_type is None:
         return
-    status = pick_status("DONE")
+    status = pick_status("DONE") if minutes else pick_status("TODO", ["TODO", "DOING"])  # DONE needs a duration
     if status is None:
         return
     result = run_cli("add-entry", json.dumps({
         "date": ctx.date, "task": task, "type": entry_type, "status": status,
-        "duration": minutes, "description": description.strip(),
+        "duration": minutes or None, "description": description.strip(),
     }))
     if result.get("ok"):
-        notify("Timur", f"Logged {format_minutes(minutes)} to {ctx.task_label(task)}")
+        notify("Timur", f"Logged {format_minutes(minutes)} to {ctx.task_label(task)}" if minutes
+               else f"Added {status} · {ctx.task_label(task)}")
     else:
         notify("Timur — not saved", result.get("error", "Unknown error"), urgent=True)
 
@@ -212,7 +219,8 @@ def add_note(ctx):
 
 def entry_line(e):
     desc = f" — {e['description']}" if e.get("description") else ""
-    return f"{format_minutes(e.get('duration')):>6}  {e.get('task', '?')}{desc}  [{e.get('status', '')}]"
+    duration = format_minutes(e["duration"]) if e.get("duration") else "—"
+    return f"{duration:>6}  {e.get('task', '?')}{desc}  [{e.get('status', '')}]"
 
 
 def entries(ctx):
@@ -240,7 +248,7 @@ def edit_entry(ctx, entry):
     }
     while True:
         options = [
-            f"Duration:     {format_minutes(fields['duration'])}",
+            f"Duration:     {format_minutes(fields['duration']) if fields['duration'] else '—'}",
             f"Description:  {fields['description'] or '—'}",
             f"Status:       {fields['status']}",
             f"Type:         {fields['type']}",
@@ -254,7 +262,8 @@ def edit_entry(ctx, entry):
         if index is None:
             return
         if index == 0:
-            fields["duration"] = ask_duration(format_minutes(fields["duration"])) or fields["duration"]
+            fields["duration"] = ask_duration(format_minutes(fields["duration"]) if fields["duration"] else None) \
+                or fields["duration"]
         elif index == 1:
             text = rofi("Description", text_input=True, prefill=fields["description"])
             if text is not None:
@@ -266,6 +275,10 @@ def edit_entry(ctx, entry):
         elif index == 4:
             fields["task"] = pick_task(ctx, "Task", fields["task"]) or fields["task"]
         elif index == 5:
+            if fields["status"] == "DONE" and not fields["duration"]:
+                fields["duration"] = ask_duration()  # DONE needs a duration
+                if not fields["duration"]:
+                    continue
             result = run_cli("update-entry", json.dumps(fields))
             if result.get("ok"):
                 notify("Timur", f"Updated {format_minutes(fields['duration'])} · {ctx.task_label(fields['task']) or entry.get('task')}")

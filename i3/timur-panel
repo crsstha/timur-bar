@@ -34,6 +34,8 @@ WIDTH = 520
 MAX_TASK_ROWS = 4
 EXPIRY_WARN_DAYS = 3
 STATUS_ORDER = ["TODO", "DOING", "DONE"]
+QUICK_DURATIONS = ["15m", "30m", "1h", "2h", "4h"]
+EDGE_GAP = 8  # pixels between the panel and the monitor's right edge
 TOP_OFFSET = int(os.environ.get("TIMUR_PANEL_OFFSET", "30"))
 
 
@@ -99,6 +101,10 @@ def parse_duration(text):
     elif m := re.fullmatch(r"(\d*\.?\d+)", s):
         minutes = round(float(m[1]) * 60)
     return minutes if 0 < minutes <= 24 * 60 else 0
+
+
+def entry_summary(entry):
+    return f"{format_minutes(entry['duration']) if entry.get('duration') else entry.get('status') or '?'} · {entry.get('task')}"
 
 
 def notify(summary, icon="appointment-new"):
@@ -167,12 +173,16 @@ class Panel(Gtk.ApplicationWindow):
         self.matches = []
         self.busy = False
         self.pending = None
-        self.syncing = False  # True while render() sets widgets, so their signals don't feed back
+        self.syncing = True  # True while build()/render() set widgets, so their signals don't feed back
+        self.fetched = set()  # days asked for since the last good refresh, so a failing fetch doesn't loop
+        self.anchor = None  # (monitor right edge, top) the panel's top-right corner sticks to
 
         self.build()
+        self.syncing = False
         self.connect("key-press-event", self.on_key)
         self.connect("notify::is-active", self.on_active_changed)
         self.connect("delete-event", lambda *a: self.hide() or True)
+        self.connect("size-allocate", self.keep_on_monitor)  # width can change as content changes
 
         self.monitor = Gio.File.new_for_path(str(STATE)).monitor_file(Gio.FileMonitorFlags.NONE, None)
         self.monitor.connect("changed", lambda *a: self.load_state())
@@ -190,12 +200,18 @@ class Panel(Gtk.ApplicationWindow):
         web.get_style_context().add_class("flat")
         web.connect("clicked", self.open_web_app)
         header.pack_start(web, False, False, 0)
-        self.day_picker, self.day_buttons = toggle_group([(-1, "Yesterday"), (0, "Today")], self.set_day)
-        self.day_buttons[0].set_active(True)
-        header.pack_end(self.day_picker, False, False, 0)
+        self.next_day = Gtk.Button(label="›", tooltip_text="Next day (Ctrl+PgDn)")
+        self.next_day.connect("clicked", lambda *a: self.set_day(self.day_offset + 1))
+        header.pack_end(self.next_day, False, False, 0)
+        self.day_button = Gtk.Button(tooltip_text="Back to today (Ctrl+Home)")
+        self.day_button.connect("clicked", lambda *a: self.set_day(0))
+        header.pack_end(self.day_button, False, False, 0)
+        prev_day = Gtk.Button(label="‹", tooltip_text="Previous day (Ctrl+PgUp)")
+        prev_day.connect("clicked", lambda *a: self.set_day(self.day_offset - 1))
+        header.pack_end(prev_day, False, False, 0)
         refresh = Gtk.Button(label="↻", tooltip_text="Refresh")
         refresh.get_style_context().add_class("flat")
-        refresh.connect("clicked", lambda *a: self.run_cli(["refresh"], None))
+        refresh.connect("clicked", lambda *a: self.refresh())
         header.pack_end(refresh, False, False, 0)
         self.day_total = label("", "dim")
         header.pack_end(self.day_total, False, False, 0)
@@ -258,22 +274,24 @@ class Panel(Gtk.ApplicationWindow):
         row.pack_start(col, False, False, 0)
         box.pack_start(row, False, False, 0)
 
-        row = Gtk.Box(spacing=16)
-        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.duration_label = label("DURATION", "section")
-        col.pack_start(self.duration_label, False, False, 0)
-        self.duration_field = Gtk.Entry(placeholder_text="hrs, e.g. 1.5", width_chars=12)
+        box.pack_start(self.duration_label, False, False, 0)
+        row = Gtk.Box(spacing=4)
+        self.duration_field = Gtk.Entry(placeholder_text="hrs, e.g. 1.5", width_chars=14)
         self.duration_field.connect("changed", lambda *a: self.render_form())
         self.duration_field.connect("activate", lambda *a: self.description_field.grab_focus())
-        col.pack_start(self.duration_field, False, False, 0)
-        row.pack_start(col, False, False, 0)
-        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        col.pack_start(label("DESCRIPTION", "section"), False, False, 0)
+        row.pack_start(self.duration_field, False, False, 0)
+        for text in QUICK_DURATIONS:
+            chip = Gtk.Button(label=text, tooltip_text=f"Set duration to {text}")
+            chip.get_style_context().add_class("flat")
+            chip.connect("clicked", lambda *a, t=text: self.set_duration(t))
+            row.pack_start(chip, False, False, 0)
+        box.pack_start(row, False, False, 0)
+
+        box.pack_start(label("DESCRIPTION", "section"), False, False, 0)
         self.description_field = Gtk.Entry(placeholder_text="What did you do?")
         self.description_field.connect("activate", lambda *a: self.save_entry())
-        col.pack_start(self.description_field, False, False, 0)
-        row.pack_start(col, True, True, 0)
-        box.pack_start(row, False, False, 0)
+        box.pack_start(self.description_field, False, False, 0)
 
         row = Gtk.Box(spacing=6)
         self.entry_message = label("", wrap=True)
@@ -336,11 +354,21 @@ class Panel(Gtk.ApplicationWindow):
 
     @property
     def day_name(self):
-        return "Today" if self.day_offset == 0 else "Yesterday"
+        if self.day_offset in (0, -1):
+            return "Today" if self.day_offset == 0 else "Yesterday"
+        return f"{dt.date.today() + dt.timedelta(days=self.day_offset):%a %d %b}"
+
+    @property
+    def day_loaded(self):
+        return self.day_iso in (self.data.get("days") or {})
 
     @property
     def day(self):
         return (self.data.get("days") or {}).get(self.day_iso) or {"entries": [], "totalMinutes": 0, "journal": ""}
+
+    @property
+    def duration_required(self):
+        return self.entry_status == "DONE"  # TODO / DOING entries can be logged without time
 
     @property
     def has_data(self):
@@ -390,6 +418,8 @@ class Panel(Gtk.ApplicationWindow):
             return
         if not self.entry_type:
             self.entry_type = self.default_type()
+        if self.has_data and not self.day_loaded and self.day_iso not in self.fetched:
+            self.refresh()  # older days aren't in the cache until asked for
         self.render()
 
     # ---------------------------------------------------------------- render
@@ -397,7 +427,7 @@ class Panel(Gtk.ApplicationWindow):
     def render(self):
         self.syncing = True
         day = self.day
-        self.day_total.set_text(f"{self.day_name} {format_minutes(day['totalMinutes'])}" if self.has_data else "")
+        self.day_total.set_text(format_minutes(day["totalMinutes"]) if self.has_data else "")
 
         expiring = not self.needs_session and self.expiry_days() < EXPIRY_WARN_DAYS
         self.session_box.set_visible(self.needs_session or not self.has_data or expiring)
@@ -424,7 +454,8 @@ class Panel(Gtk.ApplicationWindow):
                 self.type_combo.append(key, text)
         self.type_combo.set_active_id(self.entry_type or None)
         self.status_buttons.get(self.entry_status, self.status_buttons["DONE"]).set_active(True)
-        self.day_buttons[self.day_offset].set_active(True)
+        self.day_button.set_label(self.day_name)
+        self.next_day.set_sensitive(self.day_offset < 0)
         self.tab_buttons[self.tab].set_active(True)
         self.syncing = False
 
@@ -457,10 +488,14 @@ class Panel(Gtk.ApplicationWindow):
 
         text = self.duration_field.get_text().strip()
         minutes = parse_duration(text)
-        self.duration_label.set_text("DURATION" + (("  = " + format_minutes(minutes)) if minutes else "  ?") if text else "DURATION")
+        optional = "" if self.duration_required else "  (optional for " + self.entry_status + ")"
+        self.duration_label.set_text("DURATION" + ((("  = " + format_minutes(minutes)) if minutes else "  ?") if text else optional))
         set_classes(self.duration_label, "urgent" if text and not minutes else "")
-        self.save_button.set_label("Saving…" if self.busy else ("Update" if self.editing else "Save"))
-        self.save_button.set_sensitive(not self.busy and bool(self.selected_task) and bool(self.entry_type) and minutes > 0)
+        self.duration_field.set_placeholder_text("hrs, e.g. 1.5" if self.duration_required else "leave empty")
+        duration_ok = minutes > 0 if text or self.duration_required else True
+        self.save_button.set_label("Saving…" if self.busy else ("Update" if self.editing else
+                                                                 "Save" if self.duration_required else f"Add {self.entry_status}"))
+        self.save_button.set_sensitive(not self.busy and bool(self.selected_task) and bool(self.entry_type) and duration_ok)
 
     def render_entries(self):
         day = self.day
@@ -473,9 +508,13 @@ class Panel(Gtk.ApplicationWindow):
             confirming = cid and cid == self.confirm_delete_id
             editing = self.editing and cid == self.editing_id
             box = Gtk.Box(spacing=12)
-            box.pack_start(label(format_minutes(entry.get("duration")), "dim", xalign=1.0, chars=6), False, False, 0)
+            status = entry.get("status") or "DONE"
+            box.pack_start(label(format_minutes(entry["duration"]) if entry.get("duration") else "—",
+                                 "dim", xalign=1.0, chars=6), False, False, 0)
             box.pack_start(label(entry.get("task") or "?", "accent" if editing else "",
                                  ellipsize=Pango.EllipsizeMode.MIDDLE, chars=20), False, False, 0)
+            if status != "DONE" and not confirming:
+                box.pack_start(label(status, "urgent" if status == "TODO" else "accent"), False, False, 0)
             box.pack_start(label("Delete this entry?" if confirming else (entry.get("description") or ""),
                                  "urgent" if confirming else "dim", ellipsize=Pango.EllipsizeMode.END), True, True, 0)
             if cid and not self.busy:
@@ -483,7 +522,9 @@ class Panel(Gtk.ApplicationWindow):
                            ("Keep", lambda *a: self.set_confirm(""), "")] if confirming else \
                           [("Edit", lambda *a, e=entry: self.start_edit(e), ""),
                            ("Delete", lambda *a, c=cid: self.set_confirm(c), "urgent")]
-                if self.day_offset == -1 and entry.get("taskId") and not confirming:
+                if status != "DONE" and not confirming:
+                    actions.insert(0, ("✓ Done", lambda *a, e=entry: self.start_edit(e, "DONE"), "accent"))
+                if self.day_offset != 0 and entry.get("taskId") and not confirming:
                     actions.insert(0, ("→ Today", lambda *a, e=entry: self.copy_to_today(e), ""))
                 for text, handler, cls in reversed(actions):  # pack_end fills right to left
                     button = Gtk.Button()
@@ -497,6 +538,7 @@ class Panel(Gtk.ApplicationWindow):
                 row.get_style_context().add_class("confirming" if confirming else "editing")
             self.entries_list.add(row)
         self.entries_list.show_all()
+        self.nothing_logged.set_text("Nothing logged yet" if self.day_loaded else "Loading…")
         self.nothing_logged.set_visible(not day.get("entries"))
 
     def render_journal(self):
@@ -531,11 +573,14 @@ class Panel(Gtk.ApplicationWindow):
     # ---------------------------------------------------------------- handlers
 
     def set_day(self, offset):
+        offset = min(offset, 0)
         if self.syncing or offset == self.day_offset:
             return
         self.day_offset = offset
         self.cancel_edit()
         self.confirm_delete_id = ""
+        if self.has_data and not self.day_loaded:
+            self.refresh()
         self.render()
 
     def set_tab(self, tab):
@@ -548,6 +593,11 @@ class Panel(Gtk.ApplicationWindow):
     def set_status(self, status):
         if not self.syncing:
             self.entry_status = status
+            self.render_form()
+
+    def set_duration(self, text):
+        self.duration_field.set_text(text)
+        self.description_field.grab_focus()
 
     def set_confirm(self, client_id):
         self.confirm_delete_id = client_id
@@ -593,6 +643,9 @@ class Panel(Gtk.ApplicationWindow):
             else:
                 self.hide()
             return True
+        if event.state & Gdk.ModifierType.CONTROL_MASK and event.keyval in (Gdk.KEY_Page_Up, Gdk.KEY_Page_Down, Gdk.KEY_Home):
+            self.set_day({Gdk.KEY_Page_Up: self.day_offset - 1, Gdk.KEY_Page_Down: self.day_offset + 1}.get(event.keyval, 0))
+            return True
         if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and event.state & Gdk.ModifierType.CONTROL_MASK:
             self.save_entry() if self.tab == "entry" else self.add_note()
             return True
@@ -611,15 +664,17 @@ class Panel(Gtk.ApplicationWindow):
     # ---------------------------------------------------------------- actions
 
     def save_entry(self):
-        minutes = parse_duration(self.duration_field.get_text())
+        text = self.duration_field.get_text().strip()
+        minutes = parse_duration(text)
         if not self.selected_task:
             return self.show_message("Pick a task first", "error")
-        if not minutes:
-            return self.show_message("Enter a duration in hours, like 1, 1.5 or 0.25 (or 45m)", "error")
+        if not minutes and (text or self.duration_required):
+            return self.show_message("Enter a duration in hours, like 1, 1.5 or 0.25 (or 45m)"
+                                     + ("" if text else " — or set status to TODO to skip it"), "error")
         if self.busy or not self.entry_type:
             return
         fields = {"date": self.day_iso, "task": self.selected_task, "type": self.entry_type,
-                  "status": self.entry_status, "duration": minutes,
+                  "status": self.entry_status, "duration": minutes or None,
                   "description": self.description_field.get_text().strip()}
         if self.editing:
             fields["clientId"] = self.editing_id
@@ -627,19 +682,20 @@ class Panel(Gtk.ApplicationWindow):
         else:
             self.run_cli(["add-entry", json.dumps(fields)], "entry")
 
-    def start_edit(self, entry):
+    def start_edit(self, entry, status=None):
+        """Load an entry into the form. status="DONE" is the "✓ Done" shortcut for TODO/DOING entries."""
         self.confirm_delete_id = ""
         self.editing_id = entry.get("clientId") or ""
         self.editing_task_label = entry.get("task") or ""
         self.selected_task = str(entry.get("taskId") or "")
         self.entry_type = entry.get("type") or self.default_type()
-        self.entry_status = entry.get("status") or "DONE"
+        self.entry_status = status or entry.get("status") or "DONE"
         self.duration_field.set_text(format_minutes(entry["duration"]) if entry.get("duration") else "")
         self.description_field.set_text(entry.get("description") or "")
         self.task_field.set_text("")
-        self.show_message("")
+        self.show_message("How long did it take?" if status and not entry.get("duration") else "")
         self.render()
-        self.description_field.grab_focus()
+        (self.duration_field if status and not entry.get("duration") else self.description_field).grab_focus()
 
     def cancel_edit(self):
         if not self.editing:
@@ -655,7 +711,7 @@ class Panel(Gtk.ApplicationWindow):
         self.confirm_delete_id = ""
         if self.editing_id == entry.get("clientId"):
             self.cancel_edit()
-        summary = f"{format_minutes(entry.get('duration'))} · {entry.get('task')}"
+        summary = entry_summary(entry)
         self.run_cli(["delete-entry", entry["clientId"], self.day_iso], "delete", summary)
 
     def copy_to_today(self, entry):
@@ -664,7 +720,7 @@ class Panel(Gtk.ApplicationWindow):
         fields = {"date": iso(dt.date.today()), "task": str(entry["taskId"]),
                   "type": entry.get("type") or self.default_type(), "status": entry.get("status") or "DONE",
                   "duration": entry.get("duration"), "description": entry.get("description") or ""}
-        summary = f"{format_minutes(entry.get('duration'))} · {entry.get('task')}"
+        summary = entry_summary(entry)
         self.run_cli(["add-entry", json.dumps(fields)], "copy", summary)
 
     def add_note(self):
@@ -683,7 +739,7 @@ class Panel(Gtk.ApplicationWindow):
     def run_cli(self, args, action, summary=""):
         """Run timur-bar off the UI thread. action None = background refresh (errors show in the header)."""
         if self.pending is not None:
-            return
+            return False
         self.pending = (action, summary)
         if action:
             self.busy = True
@@ -699,11 +755,19 @@ class Panel(Gtk.ApplicationWindow):
             GLib.idle_add(self.finish_cli, parsed)
 
         threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def refresh(self):
+        """Background refresh that also fetches the day on screen (the timer only keeps today and yesterday)."""
+        if self.run_cli(["refresh", "--date", self.day_iso], None):
+            self.fetched.add(self.day_iso)
 
     def finish_cli(self, result):
         action, summary = self.pending
         self.pending = None
         self.busy = False
+        if action is None and result.get("ok"):
+            self.fetched.clear()
         self.load_state()
         if action is None:
             return False
@@ -714,11 +778,14 @@ class Panel(Gtk.ApplicationWindow):
             self.render()
             return False
         task = self.task_label_for(self.selected_task) or self.editing_task_label
-        minutes = format_minutes(parse_duration(self.duration_field.get_text()))
+        minutes = parse_duration(self.duration_field.get_text())
+        what = format_minutes(minutes) if minutes else self.entry_status
         if action in ("entry", "update"):
-            text = f"Logged {minutes} to {task}" if action == "entry" else f"Updated {minutes} · {task}"
+            text = (f"Logged {what} to {task}" if minutes else f"Added {what} · {task}") if action == "entry" \
+                else f"Updated {what} · {task}"
             notify(text, "appointment-new" if action == "entry" else "document-edit")
             self.editing_id = self.editing_task_label = ""
+            self.entry_status = "DONE"
             self.duration_field.set_text("")
             self.description_field.set_text("")
             self.task_field.set_text("")
@@ -739,18 +806,28 @@ class Panel(Gtk.ApplicationWindow):
 
     # ---------------------------------------------------------------- show / hide
 
+    def keep_on_monitor(self, *args):
+        """Pin the panel's top-right corner to the anchor. The real width is often more than WIDTH
+        (fonts, long labels), so placing it by WIDTH let it spill onto the monitor to the right."""
+        if self.anchor:
+            right, top = self.anchor
+            x = right - self.get_size()[0] - EDGE_GAP
+            if self.get_position() != (x, top):
+                self.move(x, top)
+
     def present_at_top_right(self):
         display = Gdk.Display.get_default()
         _, x, y = display.get_default_seat().get_pointer().get_position()
         geo = display.get_monitor_at_point(x, y).get_geometry()
-        self.move(geo.x + geo.width - WIDTH - 8, geo.y + TOP_OFFSET)
+        self.anchor = (geo.x + geo.width, geo.y + TOP_OFFSET)
+        self.keep_on_monitor()
         self.show()
         self.present_with_time(Gdk.CURRENT_TIME)
-        self.move(geo.x + geo.width - WIDTH - 8, geo.y + TOP_OFFSET)  # again after map: some WMs ignore the first
+        self.keep_on_monitor()  # again after map: some WMs ignore the first
         self.show_message("")
         self.render()
         self.focus_tab()
-        self.run_cli(["refresh"], None)
+        self.refresh()
 
 
 class App(Gtk.Application):
