@@ -10,6 +10,9 @@ plugin (crsstha.timur) and the i3 front end (polybar / i3blocks + rofi).
   timur-bar set-session                   Prompt for the sessionid/csrftoken cookies
   timur-bar set-session --window          Same, in a new terminal window
   timur-bar bar [--polybar|--i3blocks]    Print the bar text from the cached state (no network)
+  timur-bar timer start '<json>'          Start the ▶ timer: {"task", "label", "type", "description"}
+  timur-bar timer pause|resume            Pause or continue it
+  timur-bar timer stop|discard            Remove it; prints the timer with its "minutes" (min. 1)
 
 The session is read from ~/.config/timur-bar/session (key=value lines).
 Commands print one JSON object on stdout: {"ok": true, ...} or {"ok": false, "error": ...}.
@@ -33,7 +36,7 @@ COOKIE_PREFIX = "timur-PROD-"
 COOKIE_NAMES = {"sessionid": "__Secure-timur-PROD-sessionid", "csrftoken": "timur-PROD-csrftoken"}
 CACHE = Path.home() / ".cache/timur-bar"
 STATE = CACHE / "state.json"
-TIMER = CACHE / "timer.json"  # running ▶ timer, written by the i3 panel
+TIMER = CACHE / "timer.json"  # the ▶ timer, managed by `timur-bar timer` for both panels
 RECENT_DAYS = 7
 
 
@@ -342,6 +345,40 @@ def add_note(date, text):
     return {"ok": True, "line": line}
 
 
+def timer_seconds(timer, now):
+    """Time on the clock: since start, minus pauses (a paused timer stands still at pausedAt)."""
+    return max(0, (timer.get("pausedAt") or now) - timer["started"] - (timer.get("pausedSeconds") or 0))
+
+
+def timer_command(action, payload=None):
+    timer = read_json(TIMER, None)
+    now = dt.datetime.now().timestamp()
+    if action == "start":
+        if timer:
+            raise TimurError("A timer is already running — stop it first")
+        item = json.loads(payload or "{}")
+        timer = {"task": str(item["task"]), "label": item.get("label") or "", "type": item.get("type") or "",
+                 "description": item.get("description") or "", "started": now, "pausedAt": None, "pausedSeconds": 0}
+        write_json(TIMER, timer)
+    elif not timer:
+        raise TimurError("No timer is running")
+    elif action == "pause":
+        if not timer.get("pausedAt"):
+            timer["pausedAt"] = now
+            write_json(TIMER, timer)
+    elif action == "resume":
+        if timer.get("pausedAt"):
+            timer["pausedSeconds"] = (timer.get("pausedSeconds") or 0) + now - timer["pausedAt"]
+            timer["pausedAt"] = None
+            write_json(TIMER, timer)
+    elif action in ("stop", "discard"):
+        TIMER.unlink(missing_ok=True)
+        timer["minutes"] = max(1, round(timer_seconds(timer, now) / 60))
+    else:
+        raise TimurError(f"Unknown timer command: {action}")
+    return {"ok": True, "timer": timer}
+
+
 def terminal_command(title, shell_command):
     """Run shell_command in a new terminal window, whichever terminal is installed."""
     import shutil
@@ -380,8 +417,8 @@ def bar_text(style):
             text += f" · {open_count} todo"
     timer = read_json(TIMER, None)
     if timer and timer.get("started"):
-        minutes = int((now.timestamp() - timer["started"]) // 60)
-        text += f"  ▶ {minutes // 60}:{minutes % 60:02d}"
+        minutes = int(timer_seconds(timer, now.timestamp()) // 60)
+        text += f"  {'⏸' if timer.get('pausedAt') else '▶'} {minutes // 60}:{minutes % 60:02d}"
         expire = (state.get("me") or {}).get("loginExpire")
         if expire and (dt.datetime.fromisoformat(expire) - now).total_seconds() < EXPIRY_WARN_DAYS * 86400:
             text += " •"
@@ -423,6 +460,8 @@ def main(argv):
                     "Timur session", f'"{script}" set-session; echo; printf "Press Enter to close. "; read _')])
                 return 0
             return set_session()
+        elif command == "timer" and len(argv) > 2:
+            result = timer_command(argv[2], argv[3] if len(argv) > 3 else None)
         elif command == "bar":
             style = "polybar" if "--polybar" in argv else "i3blocks" if "--i3blocks" in argv else "plain"
             print(bar_text(style))

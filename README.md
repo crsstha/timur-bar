@@ -552,7 +552,7 @@ timur-bar set-session
 | Work on another day     | **Yesterday** button                        | **‹** / **›** buttons (`Ctrl+PgUp` / `Ctrl+PgDn`); click the day name (`Ctrl+Home`) to go back to today   |
 | Add a TODO              | —                                           | Set status to **TODO** (or DOING) and leave the duration empty                                            |
 | Finish a TODO           | —                                           | Click **✓ Done** next to it, enter the duration, **Update**                                               |
-| Time a task             | —                                           | Pick the task, **▶ Start timer**. The bar shows `▶ 0:42`; **■ Stop** fills in the duration, then **Save** |
+| Time a task             | —                                           | Pick the task, **▶ Start timer**. The bar shows `▶ 0:42`; **⏸ Pause** / **▶ Resume**; **■ Stop** fills in the duration, then **Save** |
 | Refresh now             | Middle-click                                | Middle-click                                                                                              |
 | Same work as last time  | —                                           | While today is empty: **⟳ Repeat yesterday** (or Friday, on a Monday) copies its DONE entries to today   |
 | End-of-day reminder     | —                                           | Weekdays after 17:00 with less than 2h logged: a notification with **Log now** / **In 30 min**            |
