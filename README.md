@@ -548,6 +548,7 @@ timur-bar set-session
 | Edit or delete an entry | Hover over the entry under **Logged today** | Click **Edit** or **Delete** next to the entry under **Logged today**. `Super+Alt+e` also opens the panel |
 | Save without clicking   | `Ctrl+Enter`                                | `Ctrl+Enter`                                                                                              |
 | Close the panel         | `Esc`                                       | `Esc`, or click somewhere else                                                                            |
+| See your week           | —                                           | The **WEEK 21h / 40h** strip under the header; click a day to open it                                     |
 | Work on another day     | **Yesterday** button                        | **‹** / **›** buttons (`Ctrl+PgUp` / `Ctrl+PgDn`); click the day name (`Ctrl+Home`) to go back to today   |
 | Add a TODO              | —                                           | Set status to **TODO** (or DOING) and leave the duration empty                                            |
 | Finish a TODO           | —                                           | Click **✓ Done** next to it, enter the duration, **Update**                                               |
@@ -916,6 +917,7 @@ Add these variables to:
 | -------------------- | -------------------- | ------------------------------------------------------------------ |
 | `TIMUR_BAR_ICON`     | `󰔟`                 | Icon or text shown before the logged time                          |
 | `TIMUR_PANEL_OFFSET` | `30`                 | i3: distance in pixels between the top of the screen and the panel |
+| `TIMUR_WEEK_TARGET`  | `40`                 | i3: weekly hours target shown in the panel's week strip            |
 | `TERMINAL`           | First terminal found | Terminal used by `set-session --window`                            |
 
 ## Notes for maintainers

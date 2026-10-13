@@ -13,6 +13,7 @@ One instance: running it again toggles the open window. It reads
 omarchy/Panel.qml. Needs python-gobject and gtk3.
 
   TIMUR_PANEL_OFFSET  pixels between the top of the monitor and the panel (bar height, default 30)
+  TIMUR_WEEK_TARGET   hours you aim to log per week, shown next to the week total (default 40)
 """
 
 import datetime as dt
@@ -41,6 +42,7 @@ STATUS_ORDER = ["TODO", "DOING", "DONE"]
 QUICK_DURATIONS = ["15m", "30m", "1h", "2h", "4h"]
 EDGE_GAP = 8  # pixels between the panel and the monitor's right edge
 TOP_OFFSET = int(os.environ.get("TIMUR_PANEL_OFFSET", "30"))
+WEEK_TARGET = float(os.environ.get("TIMUR_WEEK_TARGET", "40"))
 
 
 def find_cli():
@@ -233,6 +235,9 @@ class Panel(Gtk.ApplicationWindow):
         self.day_total = label("", "dim")
         header.pack_end(self.day_total, False, False, 0)
         body.pack_start(header, False, False, 0)
+
+        self.week_box = Gtk.Box(spacing=2)  # filled by render_week
+        body.pack_start(self.week_box, False, False, 0)
 
         self.session_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.session_text = label("", wrap=True)
@@ -477,6 +482,7 @@ class Panel(Gtk.ApplicationWindow):
             self.session_button.set_label("Update session")
 
         self.main_box.set_visible(self.has_data)
+        self.render_week()
         self.entry_tab.set_visible(self.tab == "entry")
         self.journal_tab.set_visible(self.tab == "journal")
 
@@ -505,6 +511,29 @@ class Panel(Gtk.ApplicationWindow):
         if timer:
             elapsed = dt.datetime.now().timestamp() - timer["started"]
             self.timer_label.set_text(f"▶ {format_clock(elapsed)}  ·  {timer.get('label') or '?'}")
+
+    def render_week(self):
+        """WEEK 21h / 40h   Mo 8h  Tu 7h … — click a day to open it. Weekend days only when logged."""
+        week = self.data.get("week") or []
+        for child in self.week_box.get_children():
+            self.week_box.remove(child)
+        self.week_box.set_visible(self.has_data and bool(week))
+        total = sum(d["minutes"] for d in week)
+        self.week_box.pack_start(label(f"WEEK {format_minutes(total)} / {WEEK_TARGET:g}h", "section",
+                                       "accent" if total >= WEEK_TARGET * 60 else ""), False, False, 0)
+        today = dt.date.today()
+        for d in reversed(week):  # pack_end fills right to left
+            day = dt.date.fromisoformat(d["date"])
+            if day.weekday() >= 5 and not d["minutes"]:
+                continue
+            offset = (day - today).days
+            button = Gtk.Button(tooltip_text=f"{day:%A %d %b}")
+            button.add(label(f"{day:%a}"[:2] + " " + (format_minutes(d["minutes"]) if d["minutes"] else "–"),
+                             "accent" if offset == self.day_offset else "dim"))
+            button.get_style_context().add_class("flat")
+            button.connect("clicked", lambda *a, o=offset: self.set_day(o))
+            self.week_box.pack_end(button, False, False, 0)
+        self.week_box.show_all()
 
     def render_tasks(self):
         self.matches = self.filter_tasks(self.task_field.get_text())

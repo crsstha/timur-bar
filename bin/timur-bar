@@ -235,6 +235,9 @@ def refresh(date):
 
         # The panel can show today or yesterday; keep both fresh.
         days_state = {day: day_view(day) for day in dict.fromkeys([today.isoformat(), days[1], date])}
+        # Monday..today totals for the i3 panel's week strip (already fetched above for recent tasks).
+        week = [{"date": day, "minutes": sum(e.get("duration") or 0 for e in by_day[day])}
+                for day in reversed(days[:today.weekday() + 1])]
 
         state = {
             "ok": True,
@@ -249,6 +252,7 @@ def refresh(date):
             "recentTaskIds": recent,
             "lastTypeByTask": last_type,
             "days": days_state,
+            "week": week,
         }
         write_json(STATE, state)
         return {"ok": True, "state": state}
