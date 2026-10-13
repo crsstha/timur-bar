@@ -1,0 +1,8 @@
+[Unit]
+Description=Remind to log Timur time at the end of the day
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/timur-remind
+# The "Log now" button starts the panel from here; don't kill it when this unit finishes.
+KillMode=process

@@ -62,7 +62,7 @@ add_block() {  # add_block SNIPPET TARGET — append once, between markers
   fi
 }
 
-chmod +x "$REPO/bin/"* "$REPO/i3/timur-panel" "$REPO/i3/timur-menu" "$REPO/i3/i3blocks-timur"
+chmod +x "$REPO/bin/"* "$REPO/i3/timur-panel" "$REPO/i3/timur-menu" "$REPO/i3/timur-remind" "$REPO/i3/i3blocks-timur"
 
 echo "--> Script"
 link "$REPO/bin/timur-bar" "$BIN/timur-bar"
@@ -98,6 +98,12 @@ else
   link "$REPO/i3/timur-panel" "$BIN/timur-panel"
   link "$REPO/i3/timur-menu" "$BIN/timur-menu"
   link "$REPO/i3/i3blocks-timur" "$BIN/i3blocks-timur"
+  link "$REPO/i3/timur-remind" "$BIN/timur-remind"
+  link "$REPO/i3/timur-remind.service" "$UNITS/timur-remind.service"
+  link "$REPO/i3/timur-remind.timer" "$UNITS/timur-remind.timer"
+  systemctl --user daemon-reload
+  systemctl --user enable --now timur-remind.timer >/dev/null
+  echo "    timur-remind.timer enabled (weekday evenings, if little is logged)"
   (( bindings )) && add_block "$REPO/i3/i3.config" "$HOME/.config/i3/config"
   for dep in rofi notify-send; do
     command -v "$dep" >/dev/null 2>&1 || echo "    ! missing: $dep  (sudo pacman -S ${dep/notify-send/libnotify})"
