@@ -634,7 +634,7 @@ GNOME uses the same panel as i3, so the **i3** column applies to GNOME as well. 
 | Open Timur in browser   | Right-click                                 | Scroll down on the module, or the **Web ↗** button in the panel                                           |
 | Use rofi menus          | —                                           | Scroll up on the module, or run `timur-menu`                                                              |
 | Log in one line         | —                                           | `Super+Alt+q`, type `eoc 1.5 fixed login bug` (task words, time, description) or `helix todo write tests` |
-| Log your meetings       | —                                           | Under **Meetings**, tick the ones that were work and **Log** — see [Google Calendar meetings](#google-calendar-meetings) |
+| Log your meetings       | Same as i3 →                                | Under **Meetings**, tick the ones that were work and **Log** — see [Google Calendar meetings](#google-calendar-meetings) |
 
 ### Logging time
 
@@ -690,7 +690,7 @@ Because of this, `timur-bar` reads the latest journal again before saving it.
 
 ### Google Calendar meetings
 
-On i3 and GNOME, the panel can list the meetings from your Google Calendar that you haven't logged yet, so you can log them with a click. It is optional and off until you connect a calendar.
+The panel (Omarchy, i3 and GNOME) can list the meetings from your Google Calendar that you haven't logged yet, so you can log them with a click. It is optional and off until you connect a calendar — from the panel's **⚙** (Omarchy: **⚙ → Link Google Calendar…**; i3 and GNOME: the **Link calendar** button) or with `timur-bar set-calendar`.
 
 **Connect it** (once):
 
@@ -717,7 +717,7 @@ Each meeting is logged as a DONE entry with the meeting title as description, it
 
 Google can take a few hours to update the secret address after you change a meeting. Repeating meetings with an unusual rule are left out and named in `~/.cache/timur-bar/log`.
 
-To stop, use **⚙ → Unlink Google Calendar…** in the panel (or `timur-bar clear-calendar`). The tasks it learned and the meetings you hid are kept, in case you link it again.
+To stop, use **⚙ → Unlink Google Calendar…** in the panel (Omarchy shows ⚙'s choices as a row of buttons under the header) (or `timur-bar clear-calendar`). The tasks it learned and the meetings you hid are kept, in case you link it again.
 
 ### Themes
 
