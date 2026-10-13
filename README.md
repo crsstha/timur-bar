@@ -558,6 +558,7 @@ timur-bar set-session
 | End-of-day reminder     | —                                           | Weekdays after 17:00 with less than 2h logged: a notification with **Log now** / **In 30 min**            |
 | Open Timur in browser   | Right-click                                 | Scroll down on the module, or the **Web ↗** button in the panel                                           |
 | Use rofi menus          | —                                           | Scroll up on the module, or run `timur-menu`                                                              |
+| Log in one line         | —                                           | `Super+Alt+q`, type `eoc 1.5 fixed login bug` (task words, time, description) or `helix todo write tests` |
 
 ### Logging time
 

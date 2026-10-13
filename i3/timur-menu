@@ -5,6 +5,8 @@
   timur-menu log             log time straight away
   timur-menu note            add a journal line straight away
   timur-menu entries         today's entries (edit / delete)
+  timur-menu quick [TEXT]    log in one line: "<task words> <time> [description]",
+                             e.g. "eoc 1.5 fixed login bug" or "helix todo write tests"
   --yesterday                work on yesterday instead of today
 
 Reads ~/.cache/timur-bar/state.json and runs `timur-bar` for every change.
@@ -95,6 +97,29 @@ def parse_duration(text):
     elif m := re.fullmatch(r"(\d*\.?\d+)", s):
         minutes = round(float(m[1]) * 60)
     return minutes if 0 < minutes <= 24 * 60 else 0
+
+
+QUICK_HELP = ("<task words> <time> [description]   e.g.  eoc 1.5 fixed login bug  ·  helix 45m review  ·  "
+              "helix todo write tests\nTime ends the task words: write a lone \"1\" in a task name as 1h")
+
+
+def parse_quick(text):
+    """"eoc 1.5 fixed bug" -> (["eoc"], 90, "DONE", "fixed bug"). The first token that is a time
+    (or todo/doing) ends the task words. None if there are no task words or no time."""
+    words = text.split()
+    for i, word in enumerate(words):
+        status = word.upper() if word.lower() in ("todo", "doing") else None
+        minutes = 0 if status else parse_duration(word)
+        if (status or minutes) and i:
+            return [w.lower() for w in words[:i]], minutes, status or "DONE", " ".join(words[i + 1:])
+    return None
+
+
+def match_tasks(query, tasks, recent):
+    """Tasks whose label contains every query word, recently used first."""
+    rank = {str(tid): i for i, tid in enumerate(recent)}
+    found = [t for t in tasks if all(w in t["label"].lower() for w in query)]
+    return sorted(found, key=lambda t: (rank.get(str(t["id"]), 9999), t["label"].lower()))
 
 
 class Context:
@@ -200,6 +225,42 @@ def log_time(ctx):
     if result.get("ok"):
         notify("Timur", f"Logged {format_minutes(minutes)} to {ctx.task_label(task)}" if minutes
                else f"Added {status} · {ctx.task_label(task)}")
+    else:
+        notify("Timur — not saved", result.get("error", "Unknown error"), urgent=True)
+
+
+def quick_log(ctx, text=None):
+    mesg, prefill = QUICK_HELP, None
+    while True:
+        if not text:
+            text = rofi(f"Quick log · {ctx.day_name}", text_input=True, mesg=mesg, prefill=prefill)
+            if not text:
+                return
+        parsed = parse_quick(text)
+        matches = match_tasks(parsed[0], ctx.state.get("tasks") or [], ctx.state.get("recentTaskIds") or []) \
+            if parsed else []
+        if matches:
+            break
+        mesg = (f"No active task matches “{' '.join(parsed[0])}”" if parsed else "Add a time after the task words") \
+            + "\n" + QUICK_HELP
+        text, prefill = None, text  # ask again with what was typed
+    query, minutes, status, description = parsed
+    if len(matches) > 1:
+        index = rofi("Which task?", [t["label"] for t in matches], mesg=f"“{' '.join(query)}” matches {len(matches)} tasks")
+        if index is None:
+            return
+        matches = [matches[index]]
+    task = str(matches[0]["id"])
+    types, default = ctx.type_options((ctx.state.get("lastTypeByTask") or {}).get(task))
+    entry_type = types[default]["key"] if types else "DEVELOPMENT"
+    result = run_cli("add-entry", json.dumps({
+        "date": ctx.date, "task": task, "type": entry_type, "status": status,
+        "duration": minutes or None, "description": description,
+    }))
+    what = format_minutes(minutes) if minutes else status
+    if result.get("ok"):
+        notify("Timur", (f"Logged {what} to " if minutes else f"Added {what} · ") + matches[0]["label"]
+               + (f" — {description}" if description else ""))
     else:
         notify("Timur — not saved", result.get("error", "Unknown error"), urgent=True)
 
@@ -314,6 +375,7 @@ def main_menu(ctx):
             who = (state.get("me") or {}).get("displayName") or ""
             header = f"{ctx.day_name}: {format_minutes(ctx.day.get('totalMinutes'))} logged · {who}"
         options = [
+            "  Quick log  (eoc 1.5 fixed bug)",
             "  Log time",
             "  Add journal note",
             f"  Entries ({len(ctx.day.get('entries') or [])}) — edit / delete",
@@ -326,22 +388,24 @@ def main_menu(ctx):
         if index is None:
             return
         if index == 0:
-            log_time(ctx)
+            quick_log(ctx)
         elif index == 1:
-            add_note(ctx)
+            log_time(ctx)
         elif index == 2:
-            entries(ctx)
+            add_note(ctx)
         elif index == 3:
+            entries(ctx)
+        elif index == 4:
             ctx = Context(not ctx.yesterday)
             continue
-        elif index == 4:
+        elif index == 5:
             result = run_cli("refresh")
             if not result.get("ok"):
                 notify("Timur — refresh failed", result.get("error", ""), urgent=True)
-        elif index == 5:
+        elif index == 6:
             subprocess.Popen(["xdg-open", WEB_APP], start_new_session=True)
             return
-        elif index == 6:
+        elif index == 7:
             subprocess.Popen([CLI, "set-session", "--window"], start_new_session=True)
             return
         ctx.reload()
@@ -352,7 +416,11 @@ def main(argv):
         notify("Timur", "rofi is not installed (pacman -S rofi)", urgent=True)
         return 1
     ctx = Context("--yesterday" in argv)
-    command = next((a for a in argv[1:] if not a.startswith("--")), "main")
+    words = [a for a in argv[1:] if not a.startswith("--")]
+    command = words[0] if words else "main"
+    if command == "quick":
+        quick_log(ctx, " ".join(words[1:]) or None)
+        return 0
     {"main": main_menu, "log": log_time, "note": add_note, "entries": entries}.get(command, main_menu)(ctx)
     return 0
 
