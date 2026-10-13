@@ -1,0 +1,8 @@
+[Unit]
+Description=Check every 15 minutes on weekday evenings whether to remind about Timur
+
+[Timer]
+OnCalendar=Mon..Fri 17..21:00/15
+
+[Install]
+WantedBy=timers.target

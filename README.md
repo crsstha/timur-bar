@@ -15,6 +15,10 @@ It shows how much time you have logged today in the top bar. Click the time to o
 
 󰔟 5h20 •    your Timur session expires within 3 days
 
+󰔟 5h20 · 2 todo   i3: two of today's entries are still TODO/DOING
+
+󰔟 5h20  ▶ 0:42    a timer has been running for 42 minutes (⏸ while paused)
+
 󰔟 !         not connected, or your session has expired
 ```
 
@@ -183,7 +187,7 @@ sudo pacman -S --needed i3blocks
 | `python-gobject`, `gtk3` | Used to create the Timur panel                   |
 | `rofi`                   | Provides the fallback menus                      |
 | `dunst`, `libnotify`     | Shows notifications such as "Logged 1h30 to …"   |
-| `xdg-utils`              | Opens Timur in your browser when you right-click |
+| `xdg-utils`              | Opens Timur in your browser (scroll down)        |
 | `ttf-nerd-fonts-symbols` | Provides the `󰔟` icon                           |
 
 If you do not want to use the `󰔟` icon, you can use another icon or text by adding this to `~/.profile`:
@@ -540,14 +544,21 @@ timur-bar set-session
 | To…                     | Omarchy                                     | i3                                                                                                        |
 | ----------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | Open the panel          | `Super+Alt+T` or left-click the widget      | `Super+Alt+t` or left-click the module                                                                    |
-| Add a journal note      | `Super+Alt+J`                               | `Super+Alt+j`                                                                                             |
-| Edit or delete an entry | Hover over the entry under **Logged today** | Click **Edit** or **Delete** next to the entry under **Logged today**. `Super+Alt+e` also opens the panel |
+| Add a journal note      | `Super+Alt+J`                               | `Super+Alt+j` or right-click the module                                                                   |
+| Edit or delete an entry | Hover over the entry under **Logged today** | **Edit** or **Delete** next to the entry under **Logged today**; deleted by mistake? **↶ Undo** (10 s)  |
 | Save without clicking   | `Ctrl+Enter`                                | `Ctrl+Enter`                                                                                              |
 | Close the panel         | `Esc`                                       | `Esc`, or click somewhere else                                                                            |
-| Work on yesterday       | **Yesterday** button                        | **Yesterday** button                                                                                      |
+| See your week           | Same as i3 →                                | The **WEEK 21h / 40h** strip under the header; click a day to open it                                     |
+| Work on another day     | **Yesterday** button                        | **‹** / **›** buttons (`Ctrl+PgUp` / `Ctrl+PgDn`); click the day name (`Ctrl+Home`) to go back to today   |
+| Add a TODO              | —                                           | Set status to **TODO** (or DOING) and leave the duration empty                                            |
+| Finish a TODO           | —                                           | Click **✓ Done** next to it, enter the duration, **Update**                                               |
+| Time a task             | Same as i3 →                                | Pick the task, **▶ Start timer**. The bar shows `▶ 0:42`; **⏸ Pause** / **▶ Resume**; **■ Stop** fills in the duration, then **Save** |
 | Refresh now             | Middle-click                                | Middle-click                                                                                              |
-| Open Timur in browser   | Right-click                                 | Right-click                                                                                               |
+| Same work as last time  | —                                           | While today is empty: **⟳ Repeat yesterday** (or Friday, on a Monday) copies its DONE entries to today   |
+| End-of-day reminder     | Same as i3 →                                | Weekdays after 17:00 with less than 2h logged: a notification with **Log now** / **In 30 min**            |
+| Open Timur in browser   | Right-click                                 | Scroll down on the module, or the **Web ↗** button in the panel                                           |
 | Use rofi menus          | —                                           | Scroll up on the module, or run `timur-menu`                                                              |
+| Log in one line         | —                                           | `Super+Alt+q`, type `eoc 1.5 fixed login bug` (task words, time, description) or `helix todo write tests` |
 
 ### Logging time
 
@@ -563,7 +574,8 @@ When logging time:
 
    * Arrow keys + `Enter`, or
    * Mouse click.
-4. Enter the duration.
+4. Enter the duration, or click one of **15m 30m 1h 2h 4h**.
+   On i3, a **TODO** or **DOING** entry doesn't need a duration — leave it empty and click **Add TODO**.
 5. Enter a description.
 6. Click **Save**.
 
@@ -908,6 +920,9 @@ Add these variables to:
 | -------------------- | -------------------- | ------------------------------------------------------------------ |
 | `TIMUR_BAR_ICON`     | `󰔟`                 | Icon or text shown before the logged time                          |
 | `TIMUR_PANEL_OFFSET` | `30`                 | i3: distance in pixels between the top of the screen and the panel |
+| `TIMUR_WEEK_TARGET`  | `40`                 | i3: weekly hours target shown in the panel's week strip            |
+| `TIMUR_REMIND_HOUR`    | `17`               | earliest hour for the reminder (set it in `~/.config/environment.d/timur.conf`, it runs from systemd) |
+| `TIMUR_REMIND_MINUTES` | `120`              | no reminder once this many minutes are logged today            |
 | `TERMINAL`           | First terminal found | Terminal used by `set-session --window`                            |
 
 ## Notes for maintainers

@@ -64,14 +64,17 @@ add_block() {  # add_block SNIPPET TARGET — append once, between markers
 
 chmod +x "$REPO/bin/"* "$REPO/i3/timur-panel" "$REPO/i3/timur-menu" "$REPO/i3/i3blocks-timur"
 
-echo "--> Script"
+echo "--> Scripts"
 link "$REPO/bin/timur-bar" "$BIN/timur-bar"
+link "$REPO/bin/timur-remind" "$BIN/timur-remind"
 
 echo "--> Background refresh (systemd user timer)"
 for unit in "$REPO"/systemd/*; do link "$unit" "$UNITS/$(basename "$unit")"; done
 systemctl --user daemon-reload
 systemctl --user enable --now timur-bar-refresh.timer >/dev/null
 echo "    timur-bar-refresh.timer enabled"
+systemctl --user enable --now timur-bar-remind.timer >/dev/null
+echo "    timur-bar-remind.timer enabled (weekday evenings, if little is logged)"
 
 if [[ $frontend == omarchy ]]; then
   echo "--> Omarchy bar plugin ($PLUGIN_ID)"

@@ -29,7 +29,17 @@ Panel {
   property var data: ({})
   property date now: new Date()
   readonly property string todayIso: isoDate(now)
-  readonly property string dayIso: isoDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset))
+  readonly property date dayDate: new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset)
+  readonly property string dayIso: isoDate(dayDate)
+  readonly property string dayName: dayOffset === 0 ? "Today" : dayOffset === -1 ? "Yesterday" : Qt.formatDate(dayDate, "ddd d MMM")
+  readonly property bool dayLoaded: !!(data.days && data.days[dayIso])
+  // Week strip: Monday..today totals from state.json ("week"); weekend days only when something was logged.
+  readonly property real weekTarget: parseFloat(Quickshell.env("TIMUR_WEEK_TARGET")) || 40
+  readonly property var weekDays: (data.week || []).filter(function(d) {
+    var wd = new Date(d.date + "T00:00").getDay()
+    return d.minutes > 0 || (wd !== 0 && wd !== 6)
+  })
+  readonly property int weekMinutes: (data.week || []).reduce(function(sum, d) { return sum + d.minutes }, 0)
   readonly property var day: (data.days && data.days[dayIso]) ? data.days[dayIso] : ({ entries: [], totalMinutes: 0, journal: "" })
   readonly property int todayMinutes: (data.days && data.days[todayIso]) ? data.days[todayIso].totalMinutes : 0
   readonly property bool hasData: !!data.days
@@ -38,12 +48,25 @@ Panel {
   readonly property bool expiringSoon: !needsSession && expiryDays < expiryWarnDays
   readonly property bool nudge: !needsSession && hasData && now.getHours() >= nudgeHour && todayMinutes < nudgeMinutes
 
-  readonly property string label: needsSession ? "󰔟 !" : "󰔟 " + (hasData ? formatMinutes(todayMinutes) : "…") + (expiringSoon ? " •" : "")
+  // ---- ▶ timer (~/.cache/timur-bar/timer.json, managed by `timur-bar timer`, shared with the i3 panel)
+  property var timer: null
+  readonly property bool timerPaused: !!(timer && timer.pausedAt)
+  readonly property real timerSeconds: timer
+    ? Math.max(0, (timer.pausedAt || now.getTime() / 1000) - timer.started - (timer.pausedSeconds || 0)) : 0
+  readonly property string timerText: timer ? (timerPaused ? "⏸ " : "▶ ") + formatClock(timerSeconds) : ""
+
+  readonly property string label: (needsSession ? "󰔟 !" : "󰔟 " + (hasData ? formatMinutes(todayMinutes) : "…") + (expiringSoon ? " •" : ""))
+    + (timer ? "  " + timerText : "")
 
   // ---- form state
   property string tab: "entry"          // "entry" | "journal"
-  property int dayOffset: 0             // 0 today, -1 yesterday
-  onDayOffsetChanged: { cancelEdit(); confirmDeleteId = "" }
+  property int dayOffset: 0             // 0 today, -1 yesterday, … (older days are fetched on demand)
+  onDayOffsetChanged: {
+    cancelEdit()
+    confirmDeleteId = ""
+    if (hasData && !dayLoaded) refresh()
+  }
+  property string fetchedIso: ""        // day asked for since the last good refresh, so a failing fetch doesn't loop
   property string taskQuery: ""
   property string selectedTaskId: ""
   property int taskCursor: 0
@@ -104,6 +127,11 @@ Panel {
   }
 
   // Hours by default: 1 · 1.5 · .5 · 2h · 1h30 · 1:30; minutes only with "m": 45m  →  minutes (0 if invalid)
+  function formatClock(seconds) {
+    var m = Math.floor(seconds / 60)
+    return Math.floor(m / 60) + ":" + (m % 60 < 10 ? "0" : "") + (m % 60)
+  }
+
   function parseDuration(text) {
     var minutes = parseDurationRaw(text)
     return minutes > 0 && minutes <= 24 * 60 ? minutes : 0  // over a day is surely a typo
@@ -160,7 +188,8 @@ Panel {
 
   // ---- actions
   function refresh() {
-    runCli(["refresh"], false)
+    // Also fetch the day on screen: the background timer only keeps today and yesterday.
+    if (runCli(["refresh", "--date", root.dayIso], false)) root.fetchedIso = root.dayIso
   }
 
   function saveEntry() {
@@ -225,6 +254,53 @@ Panel {
     runCli(["add-entry", JSON.stringify(fields)], true, "copy")
   }
 
+  // Timer commands are local file updates in timur-bar; they don't share the save Process.
+  property string timerAction: ""
+  function runTimer(args) {
+    if (timerProc.running) return
+    root.timerAction = args[0]
+    timerProc.command = [root.cli, "timer"].concat(args)
+    timerProc.running = true
+  }
+
+  function startTimer() {
+    if (root.selectedTaskId === "" || root.timer) return
+    runTimer(["start", JSON.stringify({ task: root.selectedTaskId, label: root.selectedTaskLabel,
+                                        type: root.entryType, description: root.description.trim() })])
+  }
+
+  function finishTimer(output) {
+    var result = {}
+    try { result = JSON.parse(String(output).trim().split("\n").pop() || "{}") }
+    catch (e) { result = { ok: false, error: "Unexpected output from timur-bar" } }
+    if (!result.ok) { showMessage(result.error || "Timer failed", "error"); timerFile.reload(); return }
+    var t = result.timer
+    if (root.timerAction === "stop") {
+      // Fill the form (duration rounded to the minute) so it can be checked and saved.
+      root.timer = null
+      cancelEdit()
+      root.dayOffset = 0
+      root.selectedTaskId = String(t.task)
+      root.entryType = t.type || defaultType()
+      root.entryStatus = "DONE"
+      root.durationText = formatMinutes(t.minutes)
+      root.description = t.description || ""
+      showMessage("■ Stopped at " + formatMinutes(t.minutes) + " — add a description and Save", "")
+      descriptionField.forceActiveFocus()
+    } else if (root.timerAction === "discard") {
+      root.timer = null
+      showMessage("Timer discarded", "")
+    } else {
+      root.timer = t
+      if (root.timerAction === "start") {
+        root.selectedTaskId = ""
+        root.description = ""
+        root.durationText = ""
+        showMessage("▶ Timer started — it keeps running with the panel closed", "ok")
+      }
+    }
+  }
+
   function addNote() {
     if (busy || noteText.trim() === "") return
     runCli(["add-note", root.dayIso, root.noteText.trim()], true, "note")
@@ -248,7 +324,7 @@ Panel {
   property string pendingAction: ""
   property string pendingSummary: ""
   function runCli(args, isSave, action) {
-    if (proc.running) return
+    if (proc.running) return false
     root.pendingAction = action || ""
     if (isSave) {
       root.busy = true
@@ -256,6 +332,7 @@ Panel {
     }
     proc.command = [root.cli].concat(args)
     proc.running = true
+    return true
   }
 
   function finishCli(output) {
@@ -265,7 +342,10 @@ Panel {
     var action = root.pendingAction
     root.pendingAction = ""
     root.busy = false
-    if (action === "") return  // refresh problems show in the header block
+    if (action === "") {  // refresh problems show in the header block
+      if (result.ok) root.fetchedIso = ""
+      return
+    }
     if (!result.ok) {
       showMessage((result.errorKind === "network" ? "Not saved — " : "") + (result.error || "Save failed") + ". Your input is kept.",
                   result.errorKind === "auth" ? "auth" : "error")
@@ -296,7 +376,7 @@ Panel {
       showMessage("✓ Copied " + root.pendingSummary + " to today", "ok")
       Quickshell.execDetached(["notify-send", "--app-name=Timur", "--icon=appointment-new", "Timur", "Copied " + root.pendingSummary + " to today"])
     } else if (action === "note") {
-      showMessage("✓ Added to " + (root.dayOffset === 0 ? "today's" : "yesterday's") + " journal", "ok")
+      showMessage("✓ Added to " + root.dayName.toLowerCase() + "'s journal", "ok")
       root.noteText = ""
       noteField.forceActiveFocus()
     }
@@ -311,6 +391,37 @@ Panel {
     onExited: root.finishCli(procOut.text)
   }
 
+  Process {
+    id: timerProc
+    stdout: StdioCollector {
+      id: timerOut
+      waitForEnd: true
+    }
+    onExited: root.finishTimer(timerOut.text)
+  }
+
+  FileView {
+    id: timerFile
+    path: Quickshell.env("HOME") + "/.cache/timur-bar/timer.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      var t = null
+      try { t = JSON.parse(text()) } catch (e) {}
+      root.timer = t && t.started ? t : null
+    }
+    onLoadFailed: root.timer = null
+  }
+
+  // Ticks the clock on the bar and in the panel while the timer runs.
+  Timer {
+    interval: 1000
+    running: !!root.timer && !root.timerPaused
+    repeat: true
+    onTriggered: root.now = new Date()
+  }
+
   FileView {
     id: stateFile
     path: Quickshell.env("HOME") + "/.cache/timur-bar/state.json"
@@ -320,6 +431,7 @@ Panel {
     onLoaded: {
       try { root.data = JSON.parse(text()) } catch (e) {}
       if (root.entryType === "") root.entryType = root.defaultType()
+      if (root.hasData && !root.dayLoaded && root.fetchedIso !== root.dayIso) root.refresh()
     }
   }
 
@@ -331,6 +443,7 @@ Panel {
     onTriggered: {
       root.now = new Date()
       stateFile.reload()
+      timerFile.reload()
     }
   }
 
@@ -431,7 +544,7 @@ Panel {
               anchors.right: refreshButton.left
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
-              text: root.hasData ? (root.dayOffset === 0 ? "Today " : "Yesterday ") + root.formatMinutes(root.day.totalMinutes) : ""
+              text: root.hasData ? root.dayName + " " + root.formatMinutes(root.day.totalMinutes) : ""
               color: Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -457,6 +570,40 @@ Panel {
               options: [{ value: "-1", label: "Yesterday" }, { value: "0", label: "Today" }]
               value: String(root.dayOffset)
               onChanged: function(v) { root.dayOffset = parseInt(v) }
+            }
+          }
+
+          // ---- Week: total vs target, a button per day that opens it
+          Item {
+            visible: root.hasData && root.weekDays.length > 0
+            width: parent.width
+            height: weekRow.implicitHeight
+
+            SectionLabel {
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "WEEK " + root.formatMinutes(root.weekMinutes) + " / " + root.weekTarget + "h"
+              color: root.weekMinutes >= root.weekTarget * 60 ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
+            }
+            Row {
+              id: weekRow
+              anchors.right: parent.right
+              spacing: Style.space(2)
+
+              Repeater {
+                model: root.weekDays
+
+                Button {
+                  required property var modelData
+                  readonly property date weekDate: new Date(modelData.date + "T00:00")
+                  readonly property int weekOffset: Math.round((weekDate - new Date(root.todayIso + "T00:00")) / 86400000)
+                  text: Qt.formatDate(weekDate, "ddd").slice(0, 2) + " " + (modelData.minutes ? root.formatMinutes(modelData.minutes) : "–")
+                  tooltipText: Qt.formatDate(weekDate, "dddd d MMMM")
+                  fontSize: Style.font.bodySmall
+                  foreground: weekOffset === root.dayOffset ? Color.accent : Qt.darker(root.bar.foreground, 1.3)
+                  onClicked: root.dayOffset = weekOffset
+                }
+              }
             }
           }
 
@@ -507,6 +654,58 @@ Panel {
             visible: root.hasData && root.tab === "entry"
             width: parent.width
             spacing: Style.space(8)
+
+            Rectangle {
+              visible: !!root.timer
+              width: parent.width
+              height: timerButtons.implicitHeight + Style.space(8)
+              radius: Style.cornerRadius
+              color: Style.hoverFillFor(root.bar.foreground, Color.accent)
+
+              Text {
+                textFormat: Text.PlainText
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(8)
+                anchors.right: timerButtons.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                elide: Text.ElideMiddle
+                text: root.timer ? root.timerText + "  ·  " + (root.timer.label || "?") : ""
+                color: Color.accent
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              Row {
+                id: timerButtons
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(4)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(4)
+
+                Button {
+                  text: root.timerPaused ? "▶ Resume" : "⏸ Pause"
+                  bordered: true
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  onClicked: root.runTimer([root.timerPaused ? "resume" : "pause"])
+                }
+                Button {
+                  text: "■ Stop"
+                  tooltipText: "Stop and fill in the duration"
+                  bordered: true
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  onClicked: root.runTimer(["stop"])
+                }
+                Button {
+                  text: "✕"
+                  tooltipText: "Discard the timer"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.bar.foreground
+                  onClicked: root.runTimer(["discard"])
+                }
+              }
+            }
 
             Rectangle {
               visible: root.editing
@@ -694,7 +893,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 anchors.left: parent.left
-                anchors.right: root.editing ? cancelEditButton.left : saveButton.left
+                anchors.right: root.editing ? cancelEditButton.left : (startTimerButton.visible ? startTimerButton.left : saveButton.left)
                 anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 wrapMode: Text.WordWrap
@@ -715,6 +914,18 @@ Panel {
                 onClicked: root.cancelEdit()
               }
               Button {
+                id: startTimerButton
+                visible: !root.editing && root.dayOffset === 0 && !root.timer
+                anchors.right: saveButton.left
+                anchors.rightMargin: Style.space(6)
+                text: "▶ Start timer"
+                tooltipText: "Time this task; the bar shows the clock while it runs"
+                bordered: true
+                enabled: !root.busy && root.selectedTaskId !== "" && root.entryType !== ""
+                foreground: root.bar.foreground
+                onClicked: root.startTimer()
+              }
+              Button {
                 id: saveButton
                 anchors.right: parent.right
                 text: root.busy ? "Saving…" : (root.editing ? "Update" : "Save")
@@ -730,7 +941,7 @@ Panel {
             Item {
               width: parent.width
               height: loggedLabel.implicitHeight
-              SectionLabel { id: loggedLabel; text: "LOGGED " + (root.dayOffset === 0 ? "TODAY" : "YESTERDAY") }
+              SectionLabel { id: loggedLabel; text: "LOGGED " + root.dayName.toUpperCase() }
               SectionLabel { anchors.right: parent.right; text: root.formatMinutes(root.day.totalMinutes) }
             }
 
@@ -801,7 +1012,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Button {
-                    visible: !entryRow.confirming && root.dayOffset === -1 && !!entryRow.modelData.taskId
+                    visible: !entryRow.confirming && root.dayOffset !== 0 && !!entryRow.modelData.taskId
                     text: "→ Today"
                     tooltipText: "Copy this entry to today"
                     fontSize: Style.font.bodySmall
@@ -844,7 +1055,7 @@ Panel {
 
             SectionLabel {
               visible: (root.day.entries || []).length === 0
-              text: "Nothing logged yet"
+              text: root.dayLoaded ? "Nothing logged yet" : "Loading…"
               font.italic: true
               font.letterSpacing: 0
             }
@@ -856,7 +1067,7 @@ Panel {
             width: parent.width
             spacing: Style.space(8)
 
-            SectionLabel { text: "ADD TO " + (root.dayOffset === 0 ? "TODAY'S" : "YESTERDAY'S") + " JOURNAL" }
+            SectionLabel { text: "ADD TO " + root.dayName.toUpperCase() + "'S JOURNAL" }
 
             TextField {
               id: noteField
@@ -900,7 +1111,7 @@ Panel {
 
             Hairline {}
 
-            SectionLabel { text: (root.dayOffset === 0 ? "TODAY'S" : "YESTERDAY'S") + " JOURNAL" }
+            SectionLabel { text: root.dayName.toUpperCase() + "'S JOURNAL" }
 
             Flickable {
               width: parent.width

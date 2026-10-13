@@ -3,13 +3,16 @@
 plugin (crsstha.timur) and the i3 front end (polybar / i3blocks + rofi).
 
   timur-bar refresh [--date YYYY-MM-DD]   Fetch entries, tasks, journal -> state.json
-  timur-bar add-entry '<json>'            Create a time entry, then refresh
+  timur-bar add-entry '<json>'            Create a time entry (or a JSON list of them), then refresh
   timur-bar update-entry '<json>'         Change an entry (matched by clientId), then refresh
   timur-bar delete-entry <clientId> [date]  Delete an entry, then refresh
   timur-bar add-note <date> <text>        Append "- HH:MM text" to that day's journal
   timur-bar set-session                   Prompt for the sessionid/csrftoken cookies
   timur-bar set-session --window          Same, in a new terminal window
   timur-bar bar [--polybar|--i3blocks]    Print the bar text from the cached state (no network)
+  timur-bar timer start '<json>'          Start the ▶ timer: {"task", "label", "type", "description"}
+  timur-bar timer pause|resume            Pause or continue it
+  timur-bar timer stop|discard            Remove it; prints the timer with its "minutes" (min. 1)
 
 The session is read from ~/.config/timur-bar/session (key=value lines).
 Commands print one JSON object on stdout: {"ok": true, ...} or {"ok": false, "error": ...}.
@@ -33,6 +36,7 @@ COOKIE_PREFIX = "timur-PROD-"
 COOKIE_NAMES = {"sessionid": "__Secure-timur-PROD-sessionid", "csrftoken": "timur-PROD-csrftoken"}
 CACHE = Path.home() / ".cache/timur-bar"
 STATE = CACHE / "state.json"
+TIMER = CACHE / "timer.json"  # the ▶ timer, managed by `timur-bar timer` for both panels
 RECENT_DAYS = 7
 
 
@@ -233,7 +237,13 @@ def refresh(date):
                     "journal": journal_for(day)}
 
         # The panel can show today or yesterday; keep both fresh.
-        days_state = {day: day_view(day) for day in dict.fromkeys([today.isoformat(), days[1], date])}
+        # The last earlier day with entries, for the i3 panel's "Repeat" (Friday, on a Monday).
+        previous_day = next((day for day in days[1:] if by_day[day]), None)
+        days_state = {day: day_view(day) for day in dict.fromkeys(
+            [today.isoformat(), days[1], date] + ([previous_day] if previous_day else []))}
+        # Monday..today totals for the i3 panel's week strip (already fetched above for recent tasks).
+        week = [{"date": day, "minutes": sum(e.get("duration") or 0 for e in by_day[day])}
+                for day in reversed(days[:today.weekday() + 1])]
 
         state = {
             "ok": True,
@@ -248,6 +258,8 @@ def refresh(date):
             "recentTaskIds": recent,
             "lastTypeByTask": last_type,
             "days": days_state,
+            "week": week,
+            "previousDay": previous_day,
         }
         write_json(STATE, state)
         return {"ok": True, "state": state}
@@ -266,8 +278,8 @@ def new_ulid():
 
 
 def add_entry(payload):
-    item = json.loads(payload)
-    entry = {
+    items = json.loads(payload)
+    entries = [{
         "clientId": new_ulid(),
         "date": item.get("date") or dt.date.today().isoformat(),
         "task": str(item["task"]),
@@ -275,12 +287,14 @@ def add_entry(payload):
         "status": item.get("status") or "DONE",
         "description": item.get("description") or "",
         "duration": int(item["duration"]) if item.get("duration") not in (None, "") else None,
-    }
-    created = cud({"createItems": [entry]}, "createItems")
-    if not created:
+    } for item in (items if isinstance(items, list) else [items])]  # a list is saved in one request
+    if not entries:
+        raise TimurError("Nothing to add")
+    created = cud({"createItems": entries}, "createItems")
+    if len(created) < len(entries):
         raise TimurError("Timur did not confirm the entry was saved")
-    refresh(entry["date"])
-    return {"ok": True, "entry": created[0]}
+    refresh(entries[0]["date"])
+    return {"ok": True, "entry": created[0], "count": len(created)}
 
 
 def cud(variables, key):
@@ -331,6 +345,40 @@ def add_note(date, text):
     return {"ok": True, "line": line}
 
 
+def timer_seconds(timer, now):
+    """Time on the clock: since start, minus pauses (a paused timer stands still at pausedAt)."""
+    return max(0, (timer.get("pausedAt") or now) - timer["started"] - (timer.get("pausedSeconds") or 0))
+
+
+def timer_command(action, payload=None):
+    timer = read_json(TIMER, None)
+    now = dt.datetime.now().timestamp()
+    if action == "start":
+        if timer:
+            raise TimurError("A timer is already running — stop it first")
+        item = json.loads(payload or "{}")
+        timer = {"task": str(item["task"]), "label": item.get("label") or "", "type": item.get("type") or "",
+                 "description": item.get("description") or "", "started": now, "pausedAt": None, "pausedSeconds": 0}
+        write_json(TIMER, timer)
+    elif not timer:
+        raise TimurError("No timer is running")
+    elif action == "pause":
+        if not timer.get("pausedAt"):
+            timer["pausedAt"] = now
+            write_json(TIMER, timer)
+    elif action == "resume":
+        if timer.get("pausedAt"):
+            timer["pausedSeconds"] = (timer.get("pausedSeconds") or 0) + now - timer["pausedAt"]
+            timer["pausedAt"] = None
+            write_json(TIMER, timer)
+    elif action in ("stop", "discard"):
+        TIMER.unlink(missing_ok=True)
+        timer["minutes"] = max(1, round(timer_seconds(timer, now) / 60))
+    else:
+        raise TimurError(f"Unknown timer command: {action}")
+    return {"ok": True, "timer": timer}
+
+
 def terminal_command(title, shell_command):
     """Run shell_command in a new terminal window, whichever terminal is installed."""
     import shutil
@@ -364,6 +412,13 @@ def bar_text(style):
     else:
         minutes = (today or {}).get("totalMinutes", 0)
         text, color = f"{BAR_ICON} {format_minutes(minutes)}", None
+        open_count = sum(e.get("status") in ("TODO", "DOING") for e in (today or {}).get("entries") or [])
+        if open_count:
+            text += f" · {open_count} todo"
+    timer = read_json(TIMER, None)
+    if timer and timer.get("started"):
+        minutes = int(timer_seconds(timer, now.timestamp()) // 60)
+        text += f"  {'⏸' if timer.get('pausedAt') else '▶'} {minutes // 60}:{minutes % 60:02d}"
         expire = (state.get("me") or {}).get("loginExpire")
         if expire and (dt.datetime.fromisoformat(expire) - now).total_seconds() < EXPIRY_WARN_DAYS * 86400:
             text += " •"
@@ -405,6 +460,8 @@ def main(argv):
                     "Timur session", f'"{script}" set-session; echo; printf "Press Enter to close. "; read _')])
                 return 0
             return set_session()
+        elif command == "timer" and len(argv) > 2:
+            result = timer_command(argv[2], argv[3] if len(argv) > 3 else None)
         elif command == "bar":
             style = "polybar" if "--polybar" in argv else "i3blocks" if "--i3blocks" in argv else "plain"
             print(bar_text(style))
