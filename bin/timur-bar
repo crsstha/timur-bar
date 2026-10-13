@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Timur (timesheet) from the desktop bar — shared core for the Omarchy
-plugin (crsstha.timur) and the i3 front end (polybar / i3blocks + rofi).
+plugin (crsstha.timur), the i3 front end (polybar / i3blocks + rofi) and the
+GNOME Shell extension (gnome/timur-bar@crsstha).
 
   timur-bar refresh [--date YYYY-MM-DD]   Fetch entries, tasks, journal -> state.json
   timur-bar add-entry '<json>'            Create a time entry (or a JSON list of them), then refresh
@@ -9,7 +10,7 @@ plugin (crsstha.timur) and the i3 front end (polybar / i3blocks + rofi).
   timur-bar add-note <date> <text>        Append "- HH:MM text" to that day's journal
   timur-bar set-session                   Prompt for the sessionid/csrftoken cookies
   timur-bar set-session --window          Same, in a new terminal window
-  timur-bar bar [--polybar|--i3blocks]    Print the bar text from the cached state (no network)
+  timur-bar bar [--polybar|--i3blocks|--json]  Print the bar text from the cached state (no network)
   timur-bar timer start '<json>'          Start the ▶ timer: {"task", "label", "type", "description"}
   timur-bar timer pause|resume            Pause or continue it
   timur-bar timer stop|discard            Remove it; prints the timer with its "minutes" (min. 1)
@@ -403,15 +404,15 @@ def format_minutes(minutes):
 
 
 def bar_text(style):
-    """Pill text for polybar/i3blocks; mirrors the label logic in omarchy/Panel.qml."""
+    """Pill text for polybar/i3blocks/GNOME; mirrors the label logic in omarchy/Panel.qml."""
     state = read_json(STATE, {})
     now = dt.datetime.now().astimezone()
     today = (state.get("days") or {}).get(now.date().isoformat())
     if state.get("errorKind") == "auth" or not state.get("days"):
-        text, color = f"{BAR_ICON} !", COLOR_URGENT
+        text, color = "!", COLOR_URGENT
     else:
         minutes = (today or {}).get("totalMinutes", 0)
-        text, color = f"{BAR_ICON} {format_minutes(minutes)}", None
+        text, color = format_minutes(minutes), None
         open_count = sum(e.get("status") in ("TODO", "DOING") for e in (today or {}).get("entries") or [])
         if open_count:
             text += f" · {open_count} todo"
@@ -424,6 +425,9 @@ def bar_text(style):
             text += " •"
         if now.hour >= NUDGE_HOUR and minutes < NUDGE_MINUTES:
             color = COLOR_DIM
+    if style == "json":  # GNOME extension: it draws its own icon
+        return json.dumps({"text": text, "color": color})
+    text = f"{BAR_ICON} {text}"
     if style == "i3blocks":
         return f"{text}\n{text}\n{color or ''}".rstrip("\n")
     if style == "polybar" and color:
@@ -463,7 +467,7 @@ def main(argv):
         elif command == "timer" and len(argv) > 2:
             result = timer_command(argv[2], argv[3] if len(argv) > 3 else None)
         elif command == "bar":
-            style = "polybar" if "--polybar" in argv else "i3blocks" if "--i3blocks" in argv else "plain"
+            style = next((s for s in ("polybar", "i3blocks", "json") if f"--{s}" in argv), "plain")
             print(bar_text(style))
             return 0
         else:

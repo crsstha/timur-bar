@@ -1,9 +1,10 @@
 #!/bin/bash
-# Install timur-bar for Omarchy (bar plugin) or i3 (polybar/i3blocks + rofi).
+# Install timur-bar for Omarchy (bar plugin), i3 (polybar/i3blocks + rofi) or GNOME (shell extension).
 #
-#   ./install.sh               auto-detect Omarchy or i3
+#   ./install.sh               auto-detect Omarchy, i3 or GNOME
 #   ./install.sh --omarchy     force the Omarchy front end
 #   ./install.sh --i3          force the i3 front end
+#   ./install.sh --gnome       force the GNOME front end (Ubuntu, Fedora, …)
 #   ./install.sh --no-bindings don't add keybindings
 #
 # Safe to run again: links are refreshed and config blocks are only added once
@@ -22,17 +23,20 @@ for arg in "$@"; do
   case "$arg" in
     --omarchy) frontend=omarchy ;;
     --i3) frontend=i3 ;;
+    --gnome) frontend=gnome ;;
     --no-bindings) bindings=0 ;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
 
 if [[ -z $frontend ]]; then
   if command -v omarchy-shell >/dev/null 2>&1; then frontend=omarchy
-  elif [[ ${XDG_CURRENT_DESKTOP:-} == *i3* ]] || pgrep -x i3 >/dev/null 2>&1 || [[ -f $HOME/.config/i3/config ]]; then frontend=i3
+  elif [[ ${XDG_CURRENT_DESKTOP:-} == *i3* ]] || pgrep -x i3 >/dev/null 2>&1; then frontend=i3
+  elif [[ ${XDG_CURRENT_DESKTOP:-} == *GNOME* ]]; then frontend=gnome
+  elif [[ -f $HOME/.config/i3/config ]]; then frontend=i3
   else
-    echo "Couldn't detect Omarchy or i3 — pass --omarchy or --i3." >&2
+    echo "Couldn't detect Omarchy, i3 or GNOME — pass --omarchy, --i3 or --gnome." >&2
     exit 1
   fi
 fi
@@ -62,7 +66,7 @@ add_block() {  # add_block SNIPPET TARGET — append once, between markers
   fi
 }
 
-chmod +x "$REPO/bin/"* "$REPO/i3/timur-panel" "$REPO/i3/timur-menu" "$REPO/i3/i3blocks-timur"
+chmod +x "$REPO/bin/"* "$REPO/i3/timur-panel" "$REPO/i3/timur-menu" "$REPO/i3/i3blocks-timur" "$REPO/gnome/keybindings.py"
 
 echo "--> Scripts"
 link "$REPO/bin/timur-bar" "$BIN/timur-bar"
@@ -96,6 +100,39 @@ if [[ $frontend == omarchy ]]; then
     add_block "$REPO/omarchy/bindings.lua" "$HOME/.config/hypr/bindings.lua"
     hyprctl reload >/dev/null 2>&1 || true
   fi
+elif [[ $frontend == gnome ]]; then
+  echo "--> GNOME Shell extension"
+  uuid=timur-bar@crsstha
+  link "$REPO/i3/timur-panel" "$BIN/timur-panel"
+  link "$REPO/i3/timur-menu" "$BIN/timur-menu"
+  link "$REPO/gnome/$uuid" "$HOME/.local/share/gnome-shell/extensions/$uuid"
+  # Enabling by gsettings works before GNOME has seen the extension; it loads at the next login.
+  python3 - "$uuid" <<'PY'
+import ast, subprocess, sys
+uuid = sys.argv[1]
+def get(key):
+    out = subprocess.run(["gsettings", "get", "org.gnome.shell", key], capture_output=True, text=True).stdout
+    return list(ast.literal_eval(out.strip().removeprefix("@as ") or "[]"))
+enabled, disabled = get("enabled-extensions"), get("disabled-extensions")
+if uuid in disabled:
+    subprocess.run(["gsettings", "set", "org.gnome.shell", "disabled-extensions", str([u for u in disabled if u != uuid])])
+if uuid not in enabled:
+    subprocess.run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(enabled + [uuid])])
+PY
+  gsettings set org.gnome.shell disable-user-extensions false
+  if gnome-extensions info "$uuid" >/dev/null 2>&1; then
+    gnome-extensions enable "$uuid" && echo "    extension enabled"
+  else
+    echo "    extension enabled from your next login (GNOME on Wayland only finds new extensions then)"
+  fi
+  if (( bindings )); then
+    echo "    keyboard shortcuts (Settings → Keyboard → Custom Shortcuts):"
+    "$REPO/gnome/keybindings.py" add
+  fi
+  command -v notify-send >/dev/null 2>&1 || echo "    ! missing: notify-send  (sudo apt install libnotify-bin)"
+  python3 -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null \
+    || echo "    ! missing: GTK for the panel  (sudo apt install python3-gi gir1.2-gtk-3.0)"
+  echo "    Log out and back in once if Timur doesn't show on the right of the top bar."
 else
   echo "--> i3 front end"
   link "$REPO/i3/timur-panel" "$BIN/timur-panel"

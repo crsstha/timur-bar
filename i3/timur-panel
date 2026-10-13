@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GTK popup for timur-bar on i3/X11, the same panel the Omarchy bar opens.
+"""GTK popup for timur-bar on i3/X11 and GNOME, the same panel the Omarchy bar opens.
 
   timur-panel              open (or close, if already open) on the Time entry tab
   timur-panel journal      open on the Journal note tab

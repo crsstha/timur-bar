@@ -8,7 +8,7 @@ Run every 15 minutes on weekday evenings. It does nothing unless it's past
 TIMUR_REMIND_HOUR (17), today has less than TIMUR_REMIND_MINUTES (120) logged,
 no ▶ timer is running, and it hasn't already reminded you today (snooze excepted).
 Reads the cache only; the refresh timer keeps it current. "Log now" opens the
-Omarchy panel when omarchy-shell is installed, otherwise the i3 panel.
+Omarchy panel when omarchy-shell is installed, otherwise the i3/GNOME panel.
 """
 
 import datetime as dt
