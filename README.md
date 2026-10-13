@@ -548,7 +548,7 @@ timur-bar set-session
 | Edit or delete an entry | Hover over the entry under **Logged today** | **Edit** or **Delete** next to the entry under **Logged today**; deleted by mistake? **↶ Undo** (10 s)  |
 | Save without clicking   | `Ctrl+Enter`                                | `Ctrl+Enter`                                                                                              |
 | Close the panel         | `Esc`                                       | `Esc`, or click somewhere else                                                                            |
-| See your week           | —                                           | The **WEEK 21h / 40h** strip under the header; click a day to open it                                     |
+| See your week           | Same as i3 →                                | The **WEEK 21h / 40h** strip under the header; click a day to open it                                     |
 | Work on another day     | **Yesterday** button                        | **‹** / **›** buttons (`Ctrl+PgUp` / `Ctrl+PgDn`); click the day name (`Ctrl+Home`) to go back to today   |
 | Add a TODO              | —                                           | Set status to **TODO** (or DOING) and leave the duration empty                                            |
 | Finish a TODO           | —                                           | Click **✓ Done** next to it, enter the duration, **Update**                                               |

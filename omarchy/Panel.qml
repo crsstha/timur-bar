@@ -29,7 +29,17 @@ Panel {
   property var data: ({})
   property date now: new Date()
   readonly property string todayIso: isoDate(now)
-  readonly property string dayIso: isoDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset))
+  readonly property date dayDate: new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset)
+  readonly property string dayIso: isoDate(dayDate)
+  readonly property string dayName: dayOffset === 0 ? "Today" : dayOffset === -1 ? "Yesterday" : Qt.formatDate(dayDate, "ddd d MMM")
+  readonly property bool dayLoaded: !!(data.days && data.days[dayIso])
+  // Week strip: Monday..today totals from state.json ("week"); weekend days only when something was logged.
+  readonly property real weekTarget: parseFloat(Quickshell.env("TIMUR_WEEK_TARGET")) || 40
+  readonly property var weekDays: (data.week || []).filter(function(d) {
+    var wd = new Date(d.date + "T00:00").getDay()
+    return d.minutes > 0 || (wd !== 0 && wd !== 6)
+  })
+  readonly property int weekMinutes: (data.week || []).reduce(function(sum, d) { return sum + d.minutes }, 0)
   readonly property var day: (data.days && data.days[dayIso]) ? data.days[dayIso] : ({ entries: [], totalMinutes: 0, journal: "" })
   readonly property int todayMinutes: (data.days && data.days[todayIso]) ? data.days[todayIso].totalMinutes : 0
   readonly property bool hasData: !!data.days
@@ -50,8 +60,13 @@ Panel {
 
   // ---- form state
   property string tab: "entry"          // "entry" | "journal"
-  property int dayOffset: 0             // 0 today, -1 yesterday
-  onDayOffsetChanged: { cancelEdit(); confirmDeleteId = "" }
+  property int dayOffset: 0             // 0 today, -1 yesterday, … (older days are fetched on demand)
+  onDayOffsetChanged: {
+    cancelEdit()
+    confirmDeleteId = ""
+    if (hasData && !dayLoaded) refresh()
+  }
+  property string fetchedIso: ""        // day asked for since the last good refresh, so a failing fetch doesn't loop
   property string taskQuery: ""
   property string selectedTaskId: ""
   property int taskCursor: 0
@@ -173,7 +188,8 @@ Panel {
 
   // ---- actions
   function refresh() {
-    runCli(["refresh"], false)
+    // Also fetch the day on screen: the background timer only keeps today and yesterday.
+    if (runCli(["refresh", "--date", root.dayIso], false)) root.fetchedIso = root.dayIso
   }
 
   function saveEntry() {
@@ -308,7 +324,7 @@ Panel {
   property string pendingAction: ""
   property string pendingSummary: ""
   function runCli(args, isSave, action) {
-    if (proc.running) return
+    if (proc.running) return false
     root.pendingAction = action || ""
     if (isSave) {
       root.busy = true
@@ -316,6 +332,7 @@ Panel {
     }
     proc.command = [root.cli].concat(args)
     proc.running = true
+    return true
   }
 
   function finishCli(output) {
@@ -325,7 +342,10 @@ Panel {
     var action = root.pendingAction
     root.pendingAction = ""
     root.busy = false
-    if (action === "") return  // refresh problems show in the header block
+    if (action === "") {  // refresh problems show in the header block
+      if (result.ok) root.fetchedIso = ""
+      return
+    }
     if (!result.ok) {
       showMessage((result.errorKind === "network" ? "Not saved — " : "") + (result.error || "Save failed") + ". Your input is kept.",
                   result.errorKind === "auth" ? "auth" : "error")
@@ -356,7 +376,7 @@ Panel {
       showMessage("✓ Copied " + root.pendingSummary + " to today", "ok")
       Quickshell.execDetached(["notify-send", "--app-name=Timur", "--icon=appointment-new", "Timur", "Copied " + root.pendingSummary + " to today"])
     } else if (action === "note") {
-      showMessage("✓ Added to " + (root.dayOffset === 0 ? "today's" : "yesterday's") + " journal", "ok")
+      showMessage("✓ Added to " + root.dayName.toLowerCase() + "'s journal", "ok")
       root.noteText = ""
       noteField.forceActiveFocus()
     }
@@ -411,6 +431,7 @@ Panel {
     onLoaded: {
       try { root.data = JSON.parse(text()) } catch (e) {}
       if (root.entryType === "") root.entryType = root.defaultType()
+      if (root.hasData && !root.dayLoaded && root.fetchedIso !== root.dayIso) root.refresh()
     }
   }
 
@@ -523,7 +544,7 @@ Panel {
               anchors.right: refreshButton.left
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
-              text: root.hasData ? (root.dayOffset === 0 ? "Today " : "Yesterday ") + root.formatMinutes(root.day.totalMinutes) : ""
+              text: root.hasData ? root.dayName + " " + root.formatMinutes(root.day.totalMinutes) : ""
               color: Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -549,6 +570,40 @@ Panel {
               options: [{ value: "-1", label: "Yesterday" }, { value: "0", label: "Today" }]
               value: String(root.dayOffset)
               onChanged: function(v) { root.dayOffset = parseInt(v) }
+            }
+          }
+
+          // ---- Week: total vs target, a button per day that opens it
+          Item {
+            visible: root.hasData && root.weekDays.length > 0
+            width: parent.width
+            height: weekRow.implicitHeight
+
+            SectionLabel {
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "WEEK " + root.formatMinutes(root.weekMinutes) + " / " + root.weekTarget + "h"
+              color: root.weekMinutes >= root.weekTarget * 60 ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
+            }
+            Row {
+              id: weekRow
+              anchors.right: parent.right
+              spacing: Style.space(2)
+
+              Repeater {
+                model: root.weekDays
+
+                Button {
+                  required property var modelData
+                  readonly property date weekDate: new Date(modelData.date + "T00:00")
+                  readonly property int weekOffset: Math.round((weekDate - new Date(root.todayIso + "T00:00")) / 86400000)
+                  text: Qt.formatDate(weekDate, "ddd").slice(0, 2) + " " + (modelData.minutes ? root.formatMinutes(modelData.minutes) : "–")
+                  tooltipText: Qt.formatDate(weekDate, "dddd d MMMM")
+                  fontSize: Style.font.bodySmall
+                  foreground: weekOffset === root.dayOffset ? Color.accent : Qt.darker(root.bar.foreground, 1.3)
+                  onClicked: root.dayOffset = weekOffset
+                }
+              }
             }
           }
 
@@ -886,7 +941,7 @@ Panel {
             Item {
               width: parent.width
               height: loggedLabel.implicitHeight
-              SectionLabel { id: loggedLabel; text: "LOGGED " + (root.dayOffset === 0 ? "TODAY" : "YESTERDAY") }
+              SectionLabel { id: loggedLabel; text: "LOGGED " + root.dayName.toUpperCase() }
               SectionLabel { anchors.right: parent.right; text: root.formatMinutes(root.day.totalMinutes) }
             }
 
@@ -957,7 +1012,7 @@ Panel {
                   spacing: Style.space(4)
 
                   Button {
-                    visible: !entryRow.confirming && root.dayOffset === -1 && !!entryRow.modelData.taskId
+                    visible: !entryRow.confirming && root.dayOffset !== 0 && !!entryRow.modelData.taskId
                     text: "→ Today"
                     tooltipText: "Copy this entry to today"
                     fontSize: Style.font.bodySmall
@@ -1000,7 +1055,7 @@ Panel {
 
             SectionLabel {
               visible: (root.day.entries || []).length === 0
-              text: "Nothing logged yet"
+              text: root.dayLoaded ? "Nothing logged yet" : "Loading…"
               font.italic: true
               font.letterSpacing: 0
             }
@@ -1012,7 +1067,7 @@ Panel {
             width: parent.width
             spacing: Style.space(8)
 
-            SectionLabel { text: "ADD TO " + (root.dayOffset === 0 ? "TODAY'S" : "YESTERDAY'S") + " JOURNAL" }
+            SectionLabel { text: "ADD TO " + root.dayName.toUpperCase() + "'S JOURNAL" }
 
             TextField {
               id: noteField
@@ -1056,7 +1111,7 @@ Panel {
 
             Hairline {}
 
-            SectionLabel { text: (root.dayOffset === 0 ? "TODAY'S" : "YESTERDAY'S") + " JOURNAL" }
+            SectionLabel { text: root.dayName.toUpperCase() + "'S JOURNAL" }
 
             Flickable {
               width: parent.width
