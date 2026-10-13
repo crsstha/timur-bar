@@ -3,7 +3,7 @@
 plugin (crsstha.timur) and the i3 front end (polybar / i3blocks + rofi).
 
   timur-bar refresh [--date YYYY-MM-DD]   Fetch entries, tasks, journal -> state.json
-  timur-bar add-entry '<json>'            Create a time entry, then refresh
+  timur-bar add-entry '<json>'            Create a time entry (or a JSON list of them), then refresh
   timur-bar update-entry '<json>'         Change an entry (matched by clientId), then refresh
   timur-bar delete-entry <clientId> [date]  Delete an entry, then refresh
   timur-bar add-note <date> <text>        Append "- HH:MM text" to that day's journal
@@ -234,7 +234,10 @@ def refresh(date):
                     "journal": journal_for(day)}
 
         # The panel can show today or yesterday; keep both fresh.
-        days_state = {day: day_view(day) for day in dict.fromkeys([today.isoformat(), days[1], date])}
+        # The last earlier day with entries, for the i3 panel's "Repeat" (Friday, on a Monday).
+        previous_day = next((day for day in days[1:] if by_day[day]), None)
+        days_state = {day: day_view(day) for day in dict.fromkeys(
+            [today.isoformat(), days[1], date] + ([previous_day] if previous_day else []))}
         # Monday..today totals for the i3 panel's week strip (already fetched above for recent tasks).
         week = [{"date": day, "minutes": sum(e.get("duration") or 0 for e in by_day[day])}
                 for day in reversed(days[:today.weekday() + 1])]
@@ -253,6 +256,7 @@ def refresh(date):
             "lastTypeByTask": last_type,
             "days": days_state,
             "week": week,
+            "previousDay": previous_day,
         }
         write_json(STATE, state)
         return {"ok": True, "state": state}
@@ -271,8 +275,8 @@ def new_ulid():
 
 
 def add_entry(payload):
-    item = json.loads(payload)
-    entry = {
+    items = json.loads(payload)
+    entries = [{
         "clientId": new_ulid(),
         "date": item.get("date") or dt.date.today().isoformat(),
         "task": str(item["task"]),
@@ -280,12 +284,14 @@ def add_entry(payload):
         "status": item.get("status") or "DONE",
         "description": item.get("description") or "",
         "duration": int(item["duration"]) if item.get("duration") not in (None, "") else None,
-    }
-    created = cud({"createItems": [entry]}, "createItems")
-    if not created:
+    } for item in (items if isinstance(items, list) else [items])]  # a list is saved in one request
+    if not entries:
+        raise TimurError("Nothing to add")
+    created = cud({"createItems": entries}, "createItems")
+    if len(created) < len(entries):
         raise TimurError("Timur did not confirm the entry was saved")
-    refresh(entry["date"])
-    return {"ok": True, "entry": created[0]}
+    refresh(entries[0]["date"])
+    return {"ok": True, "entry": created[0], "count": len(created)}
 
 
 def cud(variables, key):

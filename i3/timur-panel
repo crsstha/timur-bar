@@ -366,6 +366,10 @@ class Panel(Gtk.ApplicationWindow):
         box.pack_start(self.entries_list, False, False, 0)
         self.nothing_logged = label("Nothing logged yet", "dim")
         box.pack_start(self.nothing_logged, False, False, 0)
+        self.repeat_button = Gtk.Button(halign=Gtk.Align.START,
+                                        tooltip_text="Log the same DONE entries again today (task, type, time, description)")
+        self.repeat_button.connect("clicked", lambda *a: self.repeat_previous_day())
+        box.pack_start(self.repeat_button, False, False, 0)
         return box
 
     def build_journal_tab(self):
@@ -621,6 +625,13 @@ class Panel(Gtk.ApplicationWindow):
         self.entries_list.show_all()
         self.nothing_logged.set_text("Nothing logged yet" if self.day_loaded else "Loading…")
         self.nothing_logged.set_visible(not day.get("entries"))
+        repeat = self.repeatable()
+        self.repeat_button.set_visible(bool(repeat) and not self.busy)
+        if repeat:
+            name = "yesterday" if repeat[0] == iso(dt.date.today() - dt.timedelta(days=1)) else \
+                f"{dt.date.fromisoformat(repeat[0]):%A}"
+            minutes = sum(e.get("duration") or 0 for e in repeat[1])
+            self.repeat_button.set_label(f"⟳ Repeat {name}  ({len(repeat[1])} entries · {format_minutes(minutes)})")
 
     def render_journal(self):
         possessive = f"{self.day_name.upper()}'S"
@@ -798,6 +809,22 @@ class Panel(Gtk.ApplicationWindow):
             self.render_form()
         return False
 
+    def repeatable(self):
+        """(date, entries) of the last earlier day's DONE entries, offered while today is empty."""
+        previous = self.data.get("previousDay")
+        if self.day_offset != 0 or not self.day_loaded or self.day.get("entries") or not previous:
+            return None
+        entries = [e for e in ((self.data.get("days") or {}).get(previous) or {}).get("entries") or []
+                   if e.get("taskId") and (e.get("status") or "DONE") == "DONE"]  # Timur moves TODOs itself
+        return (previous, entries) if entries else None
+
+    def repeat_previous_day(self):
+        repeat = self.repeatable()
+        if repeat and not self.busy:
+            today = iso(dt.date.today())
+            fields = [{**entry_fields(e, today), "type": e.get("type") or self.default_type()} for e in repeat[1]]
+            self.run_cli(["add-entry", json.dumps(fields)], "repeat", f"{len(fields)} entries")
+
     def copy_to_today(self, entry):
         """Log the same work again today (task, type, status, duration, description)."""
         fields = entry_fields(entry, iso(dt.date.today()))
@@ -914,6 +941,9 @@ class Panel(Gtk.ApplicationWindow):
             self.show_message(f"✓ Deleted {summary}", "ok")
             self.undo = self.deleted
             GLib.timeout_add_seconds(UNDO_SECONDS, self.expire_undo, self.undo)
+        elif action == "repeat":
+            notify(f"Logged {summary} again today")
+            self.show_message(f"✓ Logged {summary} again today", "ok")
         elif action == "undo":
             notify(f"Restored {summary}", "edit-undo")
             self.show_message(f"✓ Restored {summary}", "ok")

@@ -554,6 +554,7 @@ timur-bar set-session
 | Finish a TODO           | —                                           | Click **✓ Done** next to it, enter the duration, **Update**                                               |
 | Time a task             | —                                           | Pick the task, **▶ Start timer**. The bar shows `▶ 0:42`; **■ Stop** fills in the duration, then **Save** |
 | Refresh now             | Middle-click                                | Middle-click                                                                                              |
+| Same work as last time  | —                                           | While today is empty: **⟳ Repeat yesterday** (or Friday, on a Monday) copies its DONE entries to today   |
 | End-of-day reminder     | —                                           | Weekdays after 17:00 with less than 2h logged: a notification with **Log now** / **In 30 min**            |
 | Open Timur in browser   | Right-click                                 | Scroll down on the module, or the **Web ↗** button in the panel                                           |
 | Use rofi menus          | —                                           | Scroll up on the module, or run `timur-menu`                                                              |
