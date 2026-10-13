@@ -10,23 +10,33 @@ GNOME Shell extension (gnome/timur-bar@crsstha).
   timur-bar add-note <date> <text>        Append "- HH:MM text" to that day's journal
   timur-bar set-session                   Prompt for the sessionid/csrftoken cookies
   timur-bar set-session --window          Same, in a new terminal window
+  timur-bar clear-session                 Forget the Timur session and the cached timesheet (sign out)
+  timur-bar set-calendar [--window]       Prompt for Google Calendar secret iCal address(es)
+  timur-bar clear-calendar                Unlink Google Calendar (learned tasks and hidden meetings are kept)
+  timur-bar log-meetings '<json list>'    Log meetings as entries (add-entry fields + uid, title), remembering task/type
+  timur-bar dismiss-meeting <key>         Stop offering a meeting (not work); no network
+  timur-bar restore-meeting <key>         Offer a dismissed meeting again; no network
   timur-bar bar [--polybar|--i3blocks|--json]  Print the bar text from the cached state (no network)
   timur-bar timer start '<json>'          Start the ▶ timer: {"task", "label", "type", "description"}
   timur-bar timer pause|resume            Pause or continue it
   timur-bar timer stop|discard            Remove it; prints the timer with its "minutes" (min. 1)
 
-The session is read from ~/.config/timur-bar/session (key=value lines).
+The session is read from ~/.config/timur-bar/session (key=value lines), the calendar
+addresses from ~/.config/timur-bar/calendar (url= lines; no file, no meetings).
 Commands print one JSON object on stdout: {"ok": true, ...} or {"ok": false, "error": ...}.
 """
 
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 API = "https://api.timur.dev.togglecorp.com/graphql/"
 ORIGIN = "https://timur.dev.togglecorp.com"
@@ -38,6 +48,8 @@ COOKIE_NAMES = {"sessionid": "__Secure-timur-PROD-sessionid", "csrftoken": "timu
 CACHE = Path.home() / ".cache/timur-bar"
 STATE = CACHE / "state.json"
 TIMER = CACHE / "timer.json"  # the ▶ timer, managed by `timur-bar timer` for both panels
+CALENDAR = Path.home() / ".config/timur-bar/calendar"  # url=<secret iCal address> lines
+CALENDAR_STATE = CACHE / "calendar.json"  # task/type learned per meeting, dismissed meetings
 RECENT_DAYS = 7
 
 
@@ -87,6 +99,56 @@ def set_session():
         return 0
     print(f"That didn't work: {result.get('error')}")
     return 1
+
+
+def set_calendar():
+    print("Google Calendar setup\n")
+    print("In Google Calendar open ⚙ Settings → your calendar (under 'Settings for my calendars') →")
+    print("Integrate calendar, and copy 'Secret address in iCal format'. Treat it like a password.\n")
+    print("Paste one address per line (e.g. your own calendar, then a team one); an empty line finishes.\n")
+    urls = []
+    while url := input(f"  Address {len(urls) + 1}: ").strip():
+        if not url.startswith("https://"):
+            print("    That's not an https:// address — skipped.")
+            continue
+        urls.append(url)
+    if not urls:
+        print("\nNo address given — nothing changed.")
+        return 1
+    print("\nChecking…")
+    today = dt.date.today().isoformat()
+    try:
+        found, _ = fetch_meetings(urls, [today])
+    except TimurError as e:
+        print(f"That didn't work: {e}")
+        return 1
+    CALENDAR.parent.mkdir(parents=True, exist_ok=True)
+    with os.fdopen(os.open(CALENDAR, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        f.write("".join(f"url={url}\n" for url in urls))
+    os.chmod(CALENDAR, 0o600)
+    print(f"Saved. {len(found.get(today) or [])} meeting(s) on your calendar today.")
+    refresh(None)
+    return 0
+
+
+def clear_session():
+    """Sign out: the session goes, and so does the cached timesheet (the ▶ timer stays, it's your time)."""
+    SESSION.unlink(missing_ok=True)
+    write_json(STATE, {"ok": False, "error": "Signed out — paste a session to connect again", "errorKind": "auth"})
+    return {"ok": True}
+
+
+def clear_calendar():
+    """Unlink the calendar. calendar.json stays, so linking again brings back learned tasks and hidden meetings."""
+    CALENDAR.unlink(missing_ok=True)
+    state = read_json(STATE, None)
+    if state:
+        state["calendar"], state["calendarError"] = False, ""
+        for view in (state.get("days") or {}).values():
+            view.pop("meetings", None)
+            view.pop("hidden", None)
+        write_json(STATE, state)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- graphql
@@ -197,6 +259,289 @@ def journal_for(date):
     return journal.get("journalText") or ""
 
 
+# ---------------------------------------------------------------- calendar
+# Meetings from Google Calendar's "Secret address in iCal format", offered in the panel
+# as entries to log. A small RFC 5545 reader: no OAuth, no dependencies.
+
+WEEKDAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+RRULE_PARTS = {"FREQ", "INTERVAL", "UNTIL", "COUNT", "BYDAY", "BYMONTHDAY", "WKST"}
+
+
+def read_calendar_urls():
+    try:
+        lines = CALENDAR.read_text().splitlines()
+    except OSError:
+        return []
+    return [line.split("=", 1)[1].strip() for line in lines
+            if line.strip().startswith("url=") and line.split("=", 1)[1].strip()]
+
+
+def calendar_owner(url):
+    """The calendar id in a secret iCal URL (/calendar/ical/<you@org>/private-…/basic.ics)."""
+    parts = urllib.parse.urlparse(url).path.split("/")
+    return urllib.parse.unquote(parts[parts.index("ical") + 1]).lower() if "ical" in parts[:-1] else ""
+
+
+def fetch_ics(url):
+    """The .ics text. Errors never include the URL: it is as good as a password."""
+    request = urllib.request.Request(url, headers={"User-Agent": "timur-bar"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        hint = " — the secret address may have been reset; run timur-bar set-calendar" if e.code == 404 else ""
+        raise TimurError(f"Calendar returned HTTP {e.code}{hint}", "network")
+    except (urllib.error.URLError, OSError):
+        raise TimurError("Can't reach Google Calendar", "network")
+
+
+def ics_line(line):
+    """'NAME;PARAM=a;P2="x:y":value' -> ("NAME", {"PARAM": "a", "P2": "x:y"}, "value")."""
+    head, quoted = len(line), False
+    for i, ch in enumerate(line):
+        if ch == '"':
+            quoted = not quoted
+        elif ch == ":" and not quoted:
+            head = i
+            break
+    parts = re.findall(r'(?:"[^"]*"|[^;])+', line[:head])
+    params = {}
+    for part in parts[1:]:
+        key, _, value = part.partition("=")
+        params[key.upper()] = value.strip('"')
+    return (parts[0].upper() if parts else ""), params, line[head + 1:]
+
+
+def ics_text(value):
+    return re.sub(r"\\([\\;,nN])", lambda m: "\n" if m[1] in "nN" else m[1], value)
+
+
+def parse_ics(text):
+    """VEVENTs as {NAME: [(params, value), …]}, without their VALARMs. Folded lines are unfolded."""
+    events, event, depth = [], None, 0
+    for line in re.sub(r"\r?\n[ \t]", "", text).splitlines():
+        name, params, value = ics_line(line)
+        if event is None:
+            if name == "BEGIN" and value.upper() == "VEVENT":
+                event, depth = {}, 0
+        elif name == "BEGIN":
+            depth += 1
+        elif name == "END" and depth:
+            depth -= 1
+        elif name == "END":
+            events.append(event)
+            event = None
+        elif not depth:
+            event.setdefault(name, []).append((params, value))
+    return events
+
+
+def ics_value(event, name):
+    return event[name][0][1] if event.get(name) else ""
+
+
+def ics_time(params, value, tz=None):
+    """(datetime, all_day). A TZID or Z time is aware; a floating one is naive (local time).
+    A DATE is all day; tz (the DTSTART zone) is used for an UNTIL without Z."""
+    value = value.strip()
+    if params.get("VALUE") == "DATE" or len(value) == 8:
+        return dt.datetime.strptime(value[:8], "%Y%m%d"), True
+    when = dt.datetime.strptime(value.rstrip("Z"), "%Y%m%dT%H%M%S")
+    if value.endswith("Z"):
+        return when.replace(tzinfo=dt.timezone.utc), False
+    if params.get("TZID"):
+        try:
+            return when.replace(tzinfo=ZoneInfo(params["TZID"])), False
+        except (ZoneInfoNotFoundError, ValueError):
+            return when, False  # an unknown zone name: treat as local time
+    return when.replace(tzinfo=tz), False
+
+
+def local(when):
+    """Aware, in this computer's time zone; naive (floating) times already are local."""
+    return when.astimezone()
+
+
+def ics_duration(value):
+    m = re.fullmatch(r"([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?", value.strip())
+    if not m:
+        return dt.timedelta(0)
+    weeks, days, hours, minutes, seconds = (int(g or 0) for g in m.groups()[1:])
+    return dt.timedelta(weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds)
+
+
+def month_end(year, month):
+    return (dt.date(year, month, 28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
+
+
+def rrule_starts(start, rule, last_day):
+    """Occurrence starts of an RRULE up to last_day, before EXDATEs. A subset of RFC 5545:
+    DAILY / WEEKLY / MONTHLY / YEARLY with INTERVAL, UNTIL, COUNT, WKST, BYDAY (also 2TU, -1FR
+    in MONTHLY) and BYMONTHDAY — what Google writes for work meetings. None for anything else."""
+    freq = rule.get("FREQ")
+    if freq not in ("DAILY", "WEEKLY", "MONTHLY", "YEARLY") or set(rule) - RRULE_PARTS \
+            or ("BYDAY" in rule and freq not in ("WEEKLY", "MONTHLY")) \
+            or ("BYMONTHDAY" in rule and freq != "MONTHLY"):
+        return None
+    byday = [re.fullmatch(r"([+-]?\d*)(MO|TU|WE|TH|FR|SA|SU)", d) for d in rule["BYDAY"].split(",")] \
+        if rule.get("BYDAY") else []
+    if not all(byday) or (freq == "WEEKLY" and any(m[1] for m in byday)):
+        return None
+    interval = max(1, int(rule.get("INTERVAL") or 1))
+    count = int(rule["COUNT"]) if rule.get("COUNT") else None
+    until = None
+    if rule.get("UNTIL"):
+        until, until_day = ics_time({}, rule["UNTIL"], start.tzinfo)
+        until = local(until + dt.timedelta(days=1) - dt.timedelta(seconds=1) if until_day else until)
+    first = start.date()
+    wkst = WEEKDAYS.index(rule.get("WKST", "MO")) if rule.get("WKST") in WEEKDAYS else 0
+
+    def period(k):
+        if freq == "DAILY":
+            return [first + dt.timedelta(days=k * interval)]
+        if freq == "WEEKLY":
+            week = first - dt.timedelta(days=(first.weekday() - wkst) % 7) + dt.timedelta(weeks=k * interval)
+            offsets = sorted({(WEEKDAYS.index(m[2]) - wkst) % 7 for m in byday} or {(first.weekday() - wkst) % 7})
+            return [week + dt.timedelta(days=o) for o in offsets]
+        if freq == "YEARLY":
+            year = first.year + k * interval
+            return [dt.date(year, first.month, first.day)] \
+                if first.day <= month_end(year, first.month).day else []
+        months = first.month - 1 + k * interval
+        last = month_end(first.year + months // 12, months % 12 + 1)
+        if byday:
+            days = []
+            for m in byday:
+                matching = [d for d in (last.replace(day=n) for n in range(1, last.day + 1))
+                            if d.weekday() == WEEKDAYS.index(m[2])]
+                n = int(m[1]) if m[1] not in ("", "+", "-") else 0
+                days += matching if n == 0 else [matching[n - 1 if n > 0 else n]] if abs(n) <= len(matching) else []
+            return sorted(days)
+        days = (int(d) for d in (rule.get("BYMONTHDAY") or str(first.day)).split(","))
+        return sorted(last.replace(day=d if d > 0 else last.day + 1 + d)
+                      for d in days if 1 <= (d if d > 0 else last.day + 1 + d) <= last.day)
+
+    starts, seen = [], 0
+    for k in range(50000):  # a daily rule from 2026 reaches the 2160s; enough for any real calendar
+        days = [d for d in period(k) if d >= first]
+        for day in days:
+            when = dt.datetime.combine(day, start.timetz())
+            seen += 1
+            if day > last_day or (until and local(when) > until) or (count and seen > count):
+                return starts
+            starts.append(when)
+    return starts
+
+
+def declined(event, owner):
+    return any(value.lower() == f"mailto:{owner}" and params.get("PARTSTAT", "").upper() == "DECLINED"
+               for params, value in event.get("ATTENDEE") or [])
+
+
+def calendar_meetings(text, owner, days):
+    """{day: [meeting, …]} for the given ISO days, plus the titles of events whose repeat rule
+    can't be read. Meetings are timed, not cancelled, not declined by owner, and in local time."""
+    days, found, skipped = set(days), {}, []
+    last_day = max(dt.date.fromisoformat(d) for d in days) + dt.timedelta(days=1)  # zones ahead of ours
+    events = parse_ics(text)
+    moved = set()  # (uid, original start) of occurrences that have their own VEVENT
+    for event in events:
+        if event.get("RECURRENCE-ID"):
+            params, value = event["RECURRENCE-ID"][0]
+            moved.add((ics_value(event, "UID"), local(ics_time(params, value)[0])))
+    for event in events:
+        if not event.get("DTSTART"):
+            continue
+        uid, title = ics_value(event, "UID"), ics_text(ics_value(event, "SUMMARY")).strip()
+        start, all_day = ics_time(*event["DTSTART"][0])
+        if all_day or ics_value(event, "STATUS").upper() == "CANCELLED" or declined(event, owner):
+            continue
+        if event.get("DTEND"):
+            length = ics_time(*event["DTEND"][0], start.tzinfo)[0] - start
+        else:
+            length = ics_duration(ics_value(event, "DURATION"))
+        if length <= dt.timedelta(0):
+            continue
+        starts = [start]
+        if event.get("RRULE") and not event.get("RECURRENCE-ID"):
+            rule = dict(part.split("=", 1) for part in ics_value(event, "RRULE").upper().split(";") if "=" in part)
+            starts = rrule_starts(start, rule, last_day)
+            if starts is None:
+                skipped.append(title)
+                continue
+            excluded = {local(ics_time(params, v, start.tzinfo)[0])
+                        for params, value in event.get("EXDATE") or [] for v in value.split(",")}
+            starts = [s for s in starts if local(s) not in excluded and (uid, local(s)) not in moved]
+        for when in starts:
+            begin = local(when)
+            day = begin.date().isoformat()
+            if day in days:
+                found.setdefault(day, []).append({
+                    "key": f"{uid}|{begin:%Y-%m-%dT%H:%M}", "uid": uid, "title": title or "(no title)",
+                    "start": begin.isoformat(timespec="minutes"),
+                    "end": (begin + length).isoformat(timespec="minutes"),
+                    "minutes": round(length.total_seconds() / 60)})
+    return found, skipped
+
+
+def fetch_meetings(urls, days):
+    """Meetings of all calendars for days; one per occurrence when calendars share an event."""
+    found, skipped = {}, []
+    for url in urls:
+        day_meetings, bad = calendar_meetings(fetch_ics(url), calendar_owner(url), days)
+        skipped += bad
+        for day, meetings in day_meetings.items():
+            keys = {m["key"] for m in found.get(day, [])}
+            found.setdefault(day, []).extend(m for m in meetings if m["key"] not in keys)
+    for meetings in found.values():
+        meetings.sort(key=lambda m: m["start"])
+    return found, skipped
+
+
+def unlogged(meetings, entries, dismissed):
+    """Meetings that have no entry starting at the same minute and weren't dismissed."""
+    logged = {(e.get("startTime") or "")[:5] for e in entries if e.get("startTime")}
+    return [m for m in meetings if m["key"] not in dismissed and m["start"][11:16] not in logged]
+
+
+def suggestion(meeting, learned, task_ids):
+    """Task and type used last time for this series (or this title), if the task is still active."""
+    for key in (f"uid:{meeting['uid']}", f"title:{meeting['title'].casefold()}"):
+        pick = learned.get(key)
+        if pick and str(pick.get("task")) in task_ids:
+            return pick
+    return {}
+
+
+def add_meetings(days_state, task_ids, previous):
+    """Put each day's meetings to log in days_state. Returns (configured, error). Calendar
+    trouble never fails the refresh: the last meetings stay, and the error is shown with them."""
+    urls = read_calendar_urls()
+    if not urls:
+        return False, ""
+    saved = read_json(CALENDAR_STATE, {})
+    error = ""
+    try:
+        found, skipped = fetch_meetings(urls, list(days_state))
+        if sorted(set(skipped)) != saved.get("skipped", []):
+            saved["skipped"] = sorted(set(skipped))
+            write_json(CALENDAR_STATE, saved)
+            if skipped:
+                log("calendar", [], {"ok": True, "skippedRepeatRules": saved["skipped"]})
+    except Exception as e:  # noqa: BLE001 — a calendar problem must not cost the Timur data
+        error = str(e) if isinstance(e, TimurError) else f"Couldn't read the calendar ({type(e).__name__})"
+        old = {day: (previous.get("days") or {}).get(day) or {} for day in days_state}
+        found = {day: sorted((v.get("meetings") or []) + (v.get("hidden") or []), key=lambda m: m["start"])
+                 for day, v in old.items()}
+    dismissed, learned = set(saved.get("dismissed") or []), saved.get("learned") or {}
+    for day, view in days_state.items():
+        meetings = [{**m, "suggest": suggestion(m, learned, task_ids)}
+                    for m in unlogged(found.get(day) or [], view["entries"], set())]
+        view["meetings"] = [m for m in meetings if m["key"] not in dismissed]
+        view["hidden"] = [m for m in meetings if m["key"] in dismissed]  # "not work", until restored
+    return True, error
+
+
 # ---------------------------------------------------------------- commands
 
 def refresh(date):
@@ -231,6 +576,7 @@ def refresh(date):
                 "task": task_label(e.get("task")),
                 "description": e.get("description") or "",
                 "duration": e.get("duration") or 0,
+                "startTime": e.get("startTime"),
                 "status": e.get("status"),
                 "type": e.get("type"),
             } for e in by_day[day]]
@@ -242,6 +588,7 @@ def refresh(date):
         previous_day = next((day for day in days[1:] if by_day[day]), None)
         days_state = {day: day_view(day) for day in dict.fromkeys(
             [today.isoformat(), days[1], date] + ([previous_day] if previous_day else []))}
+        calendar, calendar_error = add_meetings(days_state, {t["id"] for t in tasks}, previous)
         # Monday..today totals for the i3 panel's week strip (already fetched above for recent tasks).
         week = [{"date": day, "minutes": sum(e.get("duration") or 0 for e in by_day[day])}
                 for day in reversed(days[:today.weekday() + 1])]
@@ -261,6 +608,8 @@ def refresh(date):
             "days": days_state,
             "week": week,
             "previousDay": previous_day,
+            "calendar": calendar,
+            "calendarError": calendar_error,
         }
         write_json(STATE, state)
         return {"ok": True, "state": state}
@@ -288,6 +637,7 @@ def add_entry(payload):
         "status": item.get("status") or "DONE",
         "description": item.get("description") or "",
         "duration": int(item["duration"]) if item.get("duration") not in (None, "") else None,
+        "startTime": item.get("startTime") or None,
     } for item in (items if isinstance(items, list) else [items])]  # a list is saved in one request
     if not entries:
         raise TimurError("Nothing to add")
@@ -344,6 +694,49 @@ def add_note(date, text):
         raise TimurError("Timur did not confirm the journal was saved")
     refresh(date)
     return {"ok": True, "line": line}
+
+
+def log_meetings(payload):
+    """add-entry for meetings, then remember each one's task and type for its series and title."""
+    items = json.loads(payload)
+    result = add_entry(json.dumps(items))
+    saved = read_json(CALENDAR_STATE, {})
+    learned = saved.setdefault("learned", {})
+    for item in items:
+        pick = {"task": str(item["task"]), "type": item["type"]}
+        if item.get("uid"):
+            learned[f"uid:{item['uid']}"] = pick
+        if item.get("title"):
+            learned[f"title:{item['title'].casefold()}"] = pick
+    write_json(CALENDAR_STATE, saved)
+    return result
+
+
+def move_meeting(key, source, target):
+    """Move a meeting between a day's "meetings" and "hidden" lists in state.json, so the panel follows at once."""
+    state = read_json(STATE, {})
+    for view in (state.get("days") or {}).values():
+        moving = [m for m in view.get(source) or [] if m["key"] == key]
+        view[source] = [m for m in view.get(source) or [] if m["key"] != key]
+        view[target] = sorted((view.get(target) or []) + moving, key=lambda m: m["start"])
+    write_json(STATE, state)
+
+
+def dismiss_meeting(key):
+    """Stop offering a meeting (it isn't work). restore_meeting brings it back."""
+    saved = read_json(CALENDAR_STATE, {})
+    saved["dismissed"] = ([k for k in saved.get("dismissed") or [] if k != key] + [key])[-500:]
+    write_json(CALENDAR_STATE, saved)
+    move_meeting(key, "meetings", "hidden")
+    return {"ok": True}
+
+
+def restore_meeting(key):
+    saved = read_json(CALENDAR_STATE, {})
+    saved["dismissed"] = [k for k in saved.get("dismissed") or [] if k != key]
+    write_json(CALENDAR_STATE, saved)
+    move_meeting(key, "hidden", "meetings")
+    return {"ok": True}
 
 
 def timer_seconds(timer, now):
@@ -464,6 +857,23 @@ def main(argv):
                     "Timur session", f'"{script}" set-session; echo; printf "Press Enter to close. "; read _')])
                 return 0
             return set_session()
+        elif command == "set-calendar":
+            if "--window" in argv:
+                script = os.path.abspath(argv[0])
+                subprocess.Popen(["setsid", *terminal_command(
+                    "Timur calendar", f'"{script}" set-calendar; echo; printf "Press Enter to close. "; read _')])
+                return 0
+            return set_calendar()
+        elif command == "clear-session":
+            result = clear_session()
+        elif command == "clear-calendar":
+            result = clear_calendar()
+        elif command == "log-meetings" and len(argv) > 2:
+            result = log_meetings(argv[2])
+        elif command == "dismiss-meeting" and len(argv) > 2:
+            result = dismiss_meeting(argv[2])
+        elif command == "restore-meeting" and len(argv) > 2:
+            result = restore_meeting(argv[2])
         elif command == "timer" and len(argv) > 2:
             result = timer_command(argv[2], argv[3] if len(argv) > 3 else None)
         elif command == "bar":
@@ -477,7 +887,7 @@ def main(argv):
         result = {"ok": False, "error": str(e), "errorKind": e.kind}
     except (KeyError, ValueError) as e:
         result = {"ok": False, "error": f"Bad input: {e}", "errorKind": "error"}
-    if command in ("add-entry", "update-entry", "delete-entry", "add-note"):
+    if command in ("add-entry", "update-entry", "delete-entry", "add-note", "log-meetings"):
         log(command, argv[2:], result)
     print(json.dumps(result if command != "refresh" else {k: v for k, v in result.items() if k != "state"}))
     return 0 if result.get("ok") else 1
