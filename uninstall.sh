@@ -23,10 +23,8 @@ remove_block() {
 }
 
 echo "==> Uninstalling $NAME"
-systemctl --user disable --now timur-bar-refresh.timer timur-remind.timer >/dev/null 2>&1 || true
-for unit in "$REPO"/systemd/* "$REPO"/i3/timur-remind.{service,timer}; do
-  unlink_if_ours "$HOME/.config/systemd/user/$(basename "$unit")"
-done
+systemctl --user disable --now timur-bar-refresh.timer timur-bar-remind.timer >/dev/null 2>&1 || true
+for unit in "$REPO"/systemd/*; do unlink_if_ours "$HOME/.config/systemd/user/$(basename "$unit")"; done
 systemctl --user daemon-reload
 
 for f in timur-bar timur-panel timur-menu timur-remind i3blocks-timur; do unlink_if_ours "$HOME/.local/bin/$f"; done

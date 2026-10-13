@@ -555,7 +555,7 @@ timur-bar set-session
 | Time a task             | Same as i3 →                                | Pick the task, **▶ Start timer**. The bar shows `▶ 0:42`; **⏸ Pause** / **▶ Resume**; **■ Stop** fills in the duration, then **Save** |
 | Refresh now             | Middle-click                                | Middle-click                                                                                              |
 | Same work as last time  | —                                           | While today is empty: **⟳ Repeat yesterday** (or Friday, on a Monday) copies its DONE entries to today   |
-| End-of-day reminder     | —                                           | Weekdays after 17:00 with less than 2h logged: a notification with **Log now** / **In 30 min**            |
+| End-of-day reminder     | Same as i3 →                                | Weekdays after 17:00 with less than 2h logged: a notification with **Log now** / **In 30 min**            |
 | Open Timur in browser   | Right-click                                 | Scroll down on the module, or the **Web ↗** button in the panel                                           |
 | Use rofi menus          | —                                           | Scroll up on the module, or run `timur-menu`                                                              |
 | Log in one line         | —                                           | `Super+Alt+q`, type `eoc 1.5 fixed login bug` (task words, time, description) or `helix todo write tests` |
@@ -921,8 +921,8 @@ Add these variables to:
 | `TIMUR_BAR_ICON`     | `󰔟`                 | Icon or text shown before the logged time                          |
 | `TIMUR_PANEL_OFFSET` | `30`                 | i3: distance in pixels between the top of the screen and the panel |
 | `TIMUR_WEEK_TARGET`  | `40`                 | i3: weekly hours target shown in the panel's week strip            |
-| `TIMUR_REMIND_HOUR`    | `17`               | i3: earliest hour for the reminder (set it in `~/.config/environment.d/timur.conf`, it runs from systemd) |
-| `TIMUR_REMIND_MINUTES` | `120`              | i3: no reminder once this many minutes are logged today            |
+| `TIMUR_REMIND_HOUR`    | `17`               | earliest hour for the reminder (set it in `~/.config/environment.d/timur.conf`, it runs from systemd) |
+| `TIMUR_REMIND_MINUTES` | `120`              | no reminder once this many minutes are logged today            |
 | `TERMINAL`           | First terminal found | Terminal used by `set-session --window`                            |
 
 ## Notes for maintainers
