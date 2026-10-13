@@ -17,6 +17,8 @@ It shows how much time you have logged today in the top bar. Click the time to o
 
 󰔟 5h20 · 2 todo   i3: two of today's entries are still TODO/DOING
 
+󰔟 5h20  ▶ 0:42    i3: a timer has been running for 42 minutes
+
 󰔟 !         not connected, or your session has expired
 ```
 
@@ -549,6 +551,7 @@ timur-bar set-session
 | Work on another day     | **Yesterday** button                        | **‹** / **›** buttons (`Ctrl+PgUp` / `Ctrl+PgDn`); click the day name (`Ctrl+Home`) to go back to today   |
 | Add a TODO              | —                                           | Set status to **TODO** (or DOING) and leave the duration empty                                            |
 | Finish a TODO           | —                                           | Click **✓ Done** next to it, enter the duration, **Update**                                               |
+| Time a task             | —                                           | Pick the task, **▶ Start timer**. The bar shows `▶ 0:42`; **■ Stop** fills in the duration, then **Save** |
 | Refresh now             | Middle-click                                | Middle-click                                                                                              |
 | Open Timur in browser   | Right-click                                 | Scroll down on the module, or the **Web ↗** button in the panel                                           |
 | Use rofi menus          | —                                           | Scroll up on the module, or run `timur-menu`                                                              |

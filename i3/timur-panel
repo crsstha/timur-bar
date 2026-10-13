@@ -5,6 +5,9 @@
   timur-panel journal      open on the Journal note tab
   timur-panel --yesterday  start on yesterday
 
+The ▶ timer is kept in ~/.cache/timur-bar/timer.json, so it keeps running with the
+panel closed and the bar (`timur-bar bar`) shows it.
+
 One instance: running it again toggles the open window. It reads
 ~/.cache/timur-bar/state.json and runs `timur-bar` for every change, like
 omarchy/Panel.qml. Needs python-gobject and gtk3.
@@ -29,6 +32,7 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 STATE = Path.home() / ".cache/timur-bar/state.json"
+TIMER = STATE.with_name("timer.json")
 WEB_APP = "https://timur.dev.togglecorp.com/"
 WIDTH = 520
 MAX_TASK_ROWS = 4
@@ -101,6 +105,18 @@ def parse_duration(text):
     elif m := re.fullmatch(r"(\d*\.?\d+)", s):
         minutes = round(float(m[1]) * 60)
     return minutes if 0 < minutes <= 24 * 60 else 0
+
+
+def format_clock(seconds):
+    minutes = int(seconds // 60)
+    return f"{minutes // 60}:{minutes % 60:02d}"
+
+
+def read_timer():
+    try:
+        return json.loads(TIMER.read_text())
+    except (OSError, ValueError):
+        return None
 
 
 def entry_summary(entry):
@@ -187,6 +203,7 @@ class Panel(Gtk.ApplicationWindow):
         self.monitor = Gio.File.new_for_path(str(STATE)).monitor_file(Gio.FileMonitorFlags.NONE, None)
         self.monitor.connect("changed", lambda *a: self.load_state())
         GLib.timeout_add_seconds(30, lambda: self.render() or True)  # keeps "Today" and the hints current
+        GLib.timeout_add_seconds(1, lambda: self.render_timer() or True)
         self.load_state()
 
     # ---------------------------------------------------------------- layout
@@ -240,6 +257,19 @@ class Panel(Gtk.ApplicationWindow):
 
     def build_entry_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        self.timer_box = Gtk.Box(spacing=6)
+        self.timer_box.get_style_context().add_class("banner")
+        self.timer_label = label("", "accent", ellipsize=Pango.EllipsizeMode.MIDDLE)
+        self.timer_box.pack_start(self.timer_label, True, True, 0)
+        discard = Gtk.Button(label="✕", tooltip_text="Discard the timer")
+        discard.get_style_context().add_class("flat")
+        discard.connect("clicked", lambda *a: self.discard_timer())
+        self.timer_box.pack_end(discard, False, False, 0)
+        stop = Gtk.Button(label="■ Stop", tooltip_text="Stop and fill in the duration")
+        stop.connect("clicked", lambda *a: self.stop_timer())
+        self.timer_box.pack_end(stop, False, False, 0)
+        box.pack_start(self.timer_box, False, False, 0)
 
         self.edit_banner = label("✎ Editing a logged entry — Save updates it, Esc cancels", "accent", "banner")
         box.pack_start(self.edit_banner, False, False, 0)
@@ -299,6 +329,10 @@ class Panel(Gtk.ApplicationWindow):
         self.save_button = Gtk.Button(label="Save", valign=Gtk.Align.CENTER)
         self.save_button.connect("clicked", lambda *a: self.save_entry())
         row.pack_end(self.save_button, False, False, 0)
+        self.start_button = Gtk.Button(label="▶ Start timer", valign=Gtk.Align.CENTER,
+                                       tooltip_text="Time this task; the bar shows the clock while it runs")
+        self.start_button.connect("clicked", lambda *a: self.start_timer())
+        row.pack_end(self.start_button, False, False, 0)
         self.cancel_button = Gtk.Button(label="Cancel", valign=Gtk.Align.CENTER)
         self.cancel_button.connect("clicked", lambda *a: self.cancel_edit())
         row.pack_end(self.cancel_button, False, False, 0)
@@ -463,6 +497,14 @@ class Panel(Gtk.ApplicationWindow):
         self.render_form()
         self.render_entries()
         self.render_journal()
+        self.render_timer()
+
+    def render_timer(self):
+        timer = read_timer()
+        self.timer_box.set_visible(bool(timer))
+        if timer:
+            elapsed = dt.datetime.now().timestamp() - timer["started"]
+            self.timer_label.set_text(f"▶ {format_clock(elapsed)}  ·  {timer.get('label') or '?'}")
 
     def render_tasks(self):
         self.matches = self.filter_tasks(self.task_field.get_text())
@@ -485,6 +527,8 @@ class Panel(Gtk.ApplicationWindow):
         self.task_label.set_text("TASK" + (f"   ·   {selected}" if selected else ""))
         self.edit_banner.set_visible(self.editing)
         self.cancel_button.set_visible(self.editing)
+        self.start_button.set_visible(not self.editing and self.day_offset == 0 and not read_timer())
+        self.start_button.set_sensitive(not self.busy and bool(self.selected_task) and bool(self.entry_type))
 
         text = self.duration_field.get_text().strip()
         minutes = parse_duration(text)
@@ -722,6 +766,42 @@ class Panel(Gtk.ApplicationWindow):
                   "duration": entry.get("duration"), "description": entry.get("description") or ""}
         summary = entry_summary(entry)
         self.run_cli(["add-entry", json.dumps(fields)], "copy", summary)
+
+    def start_timer(self):
+        if not self.selected_task or read_timer():
+            return
+        label_text = self.task_label_for(self.selected_task)
+        TIMER.write_text(json.dumps({"task": self.selected_task, "label": label_text, "type": self.entry_type,
+                                     "description": self.description_field.get_text().strip(),
+                                     "started": dt.datetime.now().timestamp()}))
+        self.selected_task = ""
+        self.description_field.set_text("")
+        self.duration_field.set_text("")
+        self.show_message("▶ Timer started — it keeps running with the panel closed", "ok")
+        self.render()
+
+    def stop_timer(self):
+        """Fill the form from the timer (duration rounded to the minute) so you can check it and Save."""
+        timer = read_timer()
+        TIMER.unlink(missing_ok=True)
+        if not timer:
+            return self.render()
+        self.cancel_edit()
+        self.set_day(0)
+        minutes = max(1, round((dt.datetime.now().timestamp() - timer["started"]) / 60))
+        self.selected_task = str(timer["task"])
+        self.entry_type = timer.get("type") or self.default_type()
+        self.entry_status = "DONE"
+        self.duration_field.set_text(format_minutes(minutes))
+        self.description_field.set_text(timer.get("description") or "")
+        self.show_message(f"■ Stopped at {format_minutes(minutes)} — add a description and Save")
+        self.render()
+        self.description_field.grab_focus()
+
+    def discard_timer(self):
+        TIMER.unlink(missing_ok=True)
+        self.show_message("Timer discarded")
+        self.render()
 
     def add_note(self):
         text = self.note_field.get_text().strip()

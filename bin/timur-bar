@@ -33,6 +33,7 @@ COOKIE_PREFIX = "timur-PROD-"
 COOKIE_NAMES = {"sessionid": "__Secure-timur-PROD-sessionid", "csrftoken": "timur-PROD-csrftoken"}
 CACHE = Path.home() / ".cache/timur-bar"
 STATE = CACHE / "state.json"
+TIMER = CACHE / "timer.json"  # running ▶ timer, written by the i3 panel
 RECENT_DAYS = 7
 
 
@@ -367,6 +368,10 @@ def bar_text(style):
         open_count = sum(e.get("status") in ("TODO", "DOING") for e in (today or {}).get("entries") or [])
         if open_count:
             text += f" · {open_count} todo"
+    timer = read_json(TIMER, None)
+    if timer and timer.get("started"):
+        minutes = int((now.timestamp() - timer["started"]) // 60)
+        text += f"  ▶ {minutes // 60}:{minutes % 60:02d}"
         expire = (state.get("me") or {}).get("loginExpire")
         if expire and (dt.datetime.fromisoformat(expire) - now).total_seconds() < EXPIRY_WARN_DAYS * 86400:
             text += " •"
