@@ -545,7 +545,7 @@ timur-bar set-session
 | ----------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | Open the panel          | `Super+Alt+T` or left-click the widget      | `Super+Alt+t` or left-click the module                                                                    |
 | Add a journal note      | `Super+Alt+J`                               | `Super+Alt+j` or right-click the module                                                                   |
-| Edit or delete an entry | Hover over the entry under **Logged today** | Click **Edit** or **Delete** next to the entry under **Logged today**. `Super+Alt+e` also opens the panel |
+| Edit or delete an entry | Hover over the entry under **Logged today** | **Edit** or **Delete** next to the entry under **Logged today**; deleted by mistake? **↶ Undo** (10 s)  |
 | Save without clicking   | `Ctrl+Enter`                                | `Ctrl+Enter`                                                                                              |
 | Close the panel         | `Esc`                                       | `Esc`, or click somewhere else                                                                            |
 | See your week           | —                                           | The **WEEK 21h / 40h** strip under the header; click a day to open it                                     |

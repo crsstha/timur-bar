@@ -40,6 +40,7 @@ MAX_TASK_ROWS = 4
 EXPIRY_WARN_DAYS = 3
 STATUS_ORDER = ["TODO", "DOING", "DONE"]
 QUICK_DURATIONS = ["15m", "30m", "1h", "2h", "4h"]
+UNDO_SECONDS = 10
 EDGE_GAP = 8  # pixels between the panel and the monitor's right edge
 TOP_OFFSET = int(os.environ.get("TIMUR_PANEL_OFFSET", "30"))
 WEEK_TARGET = float(os.environ.get("TIMUR_WEEK_TARGET", "40"))
@@ -77,7 +78,6 @@ window.timur { background: #1b1e26; border: 2px solid #7aa2f7; }
 .timur row { padding: 3px 8px; border-radius: 3px; }
 .timur row:selected, .timur row:hover { background: #262c3a; }
 .timur row.editing { background: #232a3d; }
-.timur row.confirming { background: #3a2329; }
 .timur textview, .timur textview text { background: #1b1e26; }
 .timur separator { background: #2e3440; min-height: 1px; }
 .timur menu, .timur menuitem { background: #232733; }
@@ -119,6 +119,13 @@ def read_timer():
         return json.loads(TIMER.read_text())
     except (OSError, ValueError):
         return None
+
+
+def entry_fields(entry, date):
+    """add-entry fields that log the same work as entry on date (copy to today, undo delete)."""
+    return {"date": date, "task": str(entry["taskId"]), "type": entry.get("type"),
+            "status": entry.get("status") or "DONE", "duration": entry.get("duration") or None,
+            "description": entry.get("description") or ""}
 
 
 def entry_summary(entry):
@@ -187,7 +194,8 @@ class Panel(Gtk.ApplicationWindow):
         self.entry_status = "DONE"
         self.editing_id = ""
         self.editing_task_label = ""
-        self.confirm_delete_id = ""
+        self.deleted = None  # {"entry", "date"} of the delete in flight
+        self.undo = None  # the same once deleted, while Undo is offered
         self.matches = []
         self.busy = False
         self.pending = None
@@ -331,6 +339,9 @@ class Panel(Gtk.ApplicationWindow):
         row = Gtk.Box(spacing=6)
         self.entry_message = label("", wrap=True)
         row.pack_start(self.entry_message, True, True, 0)
+        self.undo_button = Gtk.Button(label="↶ Undo", valign=Gtk.Align.CENTER, tooltip_text="Bring the entry back")
+        self.undo_button.connect("clicked", lambda *a: self.undo_delete())
+        row.pack_start(self.undo_button, False, False, 0)
         self.save_button = Gtk.Button(label="Save", valign=Gtk.Align.CENTER)
         self.save_button.connect("clicked", lambda *a: self.save_entry())
         row.pack_end(self.save_button, False, False, 0)
@@ -556,6 +567,7 @@ class Panel(Gtk.ApplicationWindow):
         self.task_label.set_text("TASK" + (f"   ·   {selected}" if selected else ""))
         self.edit_banner.set_visible(self.editing)
         self.cancel_button.set_visible(self.editing)
+        self.undo_button.set_visible(bool(self.undo) and not self.busy)
         self.start_button.set_visible(not self.editing and self.day_offset == 0 and not read_timer())
         self.start_button.set_sensitive(not self.busy and bool(self.selected_task) and bool(self.entry_type))
 
@@ -578,7 +590,6 @@ class Panel(Gtk.ApplicationWindow):
             self.entries_list.remove(child)
         for entry in day.get("entries") or []:
             cid = entry.get("clientId") or ""
-            confirming = cid and cid == self.confirm_delete_id
             editing = self.editing and cid == self.editing_id
             box = Gtk.Box(spacing=12)
             status = entry.get("status") or "DONE"
@@ -586,18 +597,15 @@ class Panel(Gtk.ApplicationWindow):
                                  "dim", xalign=1.0, chars=6), False, False, 0)
             box.pack_start(label(entry.get("task") or "?", "accent" if editing else "",
                                  ellipsize=Pango.EllipsizeMode.MIDDLE, chars=20), False, False, 0)
-            if status != "DONE" and not confirming:
+            if status != "DONE":
                 box.pack_start(label(status, "urgent" if status == "TODO" else "accent"), False, False, 0)
-            box.pack_start(label("Delete this entry?" if confirming else (entry.get("description") or ""),
-                                 "urgent" if confirming else "dim", ellipsize=Pango.EllipsizeMode.END), True, True, 0)
+            box.pack_start(label(entry.get("description") or "", "dim", ellipsize=Pango.EllipsizeMode.END), True, True, 0)
             if cid and not self.busy:
-                actions = [("Yes, delete", lambda *a, e=entry: self.delete_entry(e), "urgent"),
-                           ("Keep", lambda *a: self.set_confirm(""), "")] if confirming else \
-                          [("Edit", lambda *a, e=entry: self.start_edit(e), ""),
-                           ("Delete", lambda *a, c=cid: self.set_confirm(c), "urgent")]
-                if status != "DONE" and not confirming:
+                actions = [("Edit", lambda *a, e=entry: self.start_edit(e), ""),
+                           ("Delete", lambda *a, e=entry: self.delete_entry(e), "urgent")]  # no confirm: Undo instead
+                if status != "DONE":
                     actions.insert(0, ("✓ Done", lambda *a, e=entry: self.start_edit(e, "DONE"), "accent"))
-                if self.day_offset != 0 and entry.get("taskId") and not confirming:
+                if self.day_offset != 0 and entry.get("taskId"):
                     actions.insert(0, ("→ Today", lambda *a, e=entry: self.copy_to_today(e), ""))
                 for text, handler, cls in reversed(actions):  # pack_end fills right to left
                     button = Gtk.Button()
@@ -607,8 +615,8 @@ class Panel(Gtk.ApplicationWindow):
                     box.pack_end(button, False, False, 0)
             row = Gtk.ListBoxRow()
             row.add(box)
-            if confirming or editing:
-                row.get_style_context().add_class("confirming" if confirming else "editing")
+            if editing:
+                row.get_style_context().add_class("editing")
             self.entries_list.add(row)
         self.entries_list.show_all()
         self.nothing_logged.set_text("Nothing logged yet" if self.day_loaded else "Loading…")
@@ -651,7 +659,6 @@ class Panel(Gtk.ApplicationWindow):
             return
         self.day_offset = offset
         self.cancel_edit()
-        self.confirm_delete_id = ""
         if self.has_data and not self.day_loaded:
             self.refresh()
         self.render()
@@ -671,10 +678,6 @@ class Panel(Gtk.ApplicationWindow):
     def set_duration(self, text):
         self.duration_field.set_text(text)
         self.description_field.grab_focus()
-
-    def set_confirm(self, client_id):
-        self.confirm_delete_id = client_id
-        self.render_entries()
 
     def on_type_changed(self, combo):
         if not self.syncing and combo.get_active_id():
@@ -709,9 +712,7 @@ class Panel(Gtk.ApplicationWindow):
 
     def on_key(self, widget, event):
         if event.keyval == Gdk.KEY_Escape:
-            if self.confirm_delete_id:
-                self.set_confirm("")
-            elif self.editing:
+            if self.editing:
                 self.cancel_edit()
             else:
                 self.hide()
@@ -757,7 +758,6 @@ class Panel(Gtk.ApplicationWindow):
 
     def start_edit(self, entry, status=None):
         """Load an entry into the form. status="DONE" is the "✓ Done" shortcut for TODO/DOING entries."""
-        self.confirm_delete_id = ""
         self.editing_id = entry.get("clientId") or ""
         self.editing_task_label = entry.get("task") or ""
         self.selected_task = str(entry.get("taskId") or "")
@@ -781,20 +781,28 @@ class Panel(Gtk.ApplicationWindow):
         self.render()
 
     def delete_entry(self, entry):
-        self.confirm_delete_id = ""
         if self.editing_id == entry.get("clientId"):
             self.cancel_edit()
-        summary = entry_summary(entry)
-        self.run_cli(["delete-entry", entry["clientId"], self.day_iso], "delete", summary)
+        self.deleted = {"entry": entry, "date": self.day_iso}
+        self.run_cli(["delete-entry", entry["clientId"], self.day_iso], "delete", entry_summary(entry))
+
+    def undo_delete(self):
+        """Log the deleted entry again (it gets a new id; same task, type, status, time, description)."""
+        if self.undo and not self.busy:
+            entry, date = self.undo["entry"], self.undo["date"]
+            self.run_cli(["add-entry", json.dumps(entry_fields(entry, date))], "undo", entry_summary(entry))
+
+    def expire_undo(self, undo):
+        if self.undo is undo:
+            self.undo = None
+            self.render_form()
+        return False
 
     def copy_to_today(self, entry):
         """Log the same work again today (task, type, status, duration, description)."""
-        self.confirm_delete_id = ""
-        fields = {"date": iso(dt.date.today()), "task": str(entry["taskId"]),
-                  "type": entry.get("type") or self.default_type(), "status": entry.get("status") or "DONE",
-                  "duration": entry.get("duration"), "description": entry.get("description") or ""}
-        summary = entry_summary(entry)
-        self.run_cli(["add-entry", json.dumps(fields)], "copy", summary)
+        fields = entry_fields(entry, iso(dt.date.today()))
+        fields["type"] = fields["type"] or self.default_type()
+        self.run_cli(["add-entry", json.dumps(fields)], "copy", entry_summary(entry))
 
     def start_timer(self):
         if not self.selected_task or read_timer():
@@ -851,6 +859,7 @@ class Panel(Gtk.ApplicationWindow):
             return False
         self.pending = (action, summary)
         if action:
+            self.undo = None  # Undo only follows the delete directly
             self.busy = True
             self.show_message("Saving…")
             self.render()
@@ -903,6 +912,11 @@ class Panel(Gtk.ApplicationWindow):
         elif action == "delete":
             notify(f"Deleted {summary}", "edit-delete")
             self.show_message(f"✓ Deleted {summary}", "ok")
+            self.undo = self.deleted
+            GLib.timeout_add_seconds(UNDO_SECONDS, self.expire_undo, self.undo)
+        elif action == "undo":
+            notify(f"Restored {summary}", "edit-undo")
+            self.show_message(f"✓ Restored {summary}", "ok")
         elif action == "copy":
             notify(f"Copied {summary} to today")
             self.show_message(f"✓ Copied {summary} to today", "ok")
