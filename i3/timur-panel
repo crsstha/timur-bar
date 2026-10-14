@@ -1121,9 +1121,8 @@ class Panel(Gtk.ApplicationWindow):
             self.repeat_button.set_label(f"⟳ Repeat {name}  ({len(repeat[1])} entries · {format_minutes(minutes)})")
 
     def visible_meetings(self):
-        """The day's meetings not logged yet that have started (you can't log a meeting ahead)."""
-        now = dt.datetime.now().astimezone()
-        return [m for m in self.day.get("meetings") or [] if dt.datetime.fromisoformat(m["start"]) <= now]
+        """The day's meetings not logged yet, upcoming ones too (they start unticked)."""
+        return list(self.day.get("meetings") or [])
 
     def meeting_pick(self, meeting):
         """Choices for a meeting row; the first time, from what was used for it before. A meeting
@@ -1159,9 +1158,8 @@ class Panel(Gtk.ApplicationWindow):
         self.render_meetings_button()
 
     def hidden_meetings(self):
-        """The day's started meetings marked as not work (✕), which can be restored."""
-        now = dt.datetime.now().astimezone()
-        return [m for m in self.day.get("hidden") or [] if dt.datetime.fromisoformat(m["start"]) <= now]
+        """The day's meetings marked as not work (✕), which can be restored."""
+        return list(self.day.get("hidden") or [])
 
     def render_hidden(self, hidden):
         """The "N hidden" toggle in the Meetings header, and the list it opens with ↶ Restore per meeting."""
@@ -1181,7 +1179,7 @@ class Panel(Gtk.ApplicationWindow):
             row = Gtk.Box(spacing=6)
             row.pack_start(label(f"{dt.datetime.fromisoformat(meeting['start']):%H:%M}", "dim"), False, False, 0)
             row.pack_start(label(meeting["title"], "dim", ellipsize=Pango.EllipsizeMode.END), True, True, 0)
-            restore = Gtk.Button(tooltip_text="Offer this meeting again")
+            restore = Gtk.Button(tooltip_text="Offer this meeting, and ones with the same title, again on every day")
             restore.get_style_context().add_class("flat")
             restore.add(label("↶ Restore", "accent"))
             restore.connect("clicked", lambda *a, m=meeting: self.restore_meeting(m))
@@ -1236,7 +1234,7 @@ class Panel(Gtk.ApplicationWindow):
             type_button.set_popup(menu)
             row.pack_start(type_button, False, False, 0)
 
-            dismiss = Gtk.Button(label="✕", tooltip_text="Not work — hide it (restore it from “hidden” next to MEETINGS)")
+            dismiss = Gtk.Button(label="✕", tooltip_text="Not work — hide it, and meetings with the same title, every day (restore from “hidden” next to MEETINGS)")
             dismiss.get_style_context().add_class("flat")
             dismiss.connect("clicked", lambda *a, m=meeting: self.dismiss_meeting(m))
             row.pack_start(dismiss, False, False, 0)
@@ -1629,12 +1627,12 @@ class Panel(Gtk.ApplicationWindow):
         subprocess.run([CLI, "dismiss-meeting", meeting["key"]], capture_output=True)
         self.meeting_picks.pop(meeting["key"], None)
         self.load_state()
-        self.show_message(f"Hidden “{meeting['title']}” — “hidden” next to MEETINGS brings it back")
+        self.show_message(f"Hidden “{meeting['title']}” and same-titled meetings on every day — “hidden” next to MEETINGS brings them back")
 
     def restore_meeting(self, meeting):
         subprocess.run([CLI, "restore-meeting", meeting["key"]], capture_output=True)
         self.load_state()
-        self.show_message(f"✓ “{meeting['title']}” is back in Meetings", "ok")
+        self.show_message(f"✓ “{meeting['title']}” and same-titled meetings are back on every day", "ok")
 
     def ask_confirm(self, action):
         """Show (or with None, dismiss) the confirmation banner for a ⚙ action."""

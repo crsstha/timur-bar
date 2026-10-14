@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Timur (timesheet) from the desktop bar — shared core for the Omarchy
-plugin (crsstha.timur), the i3 front end (polybar / i3blocks + rofi) and the
+plugin (togglecorp.timur), the i3 front end (polybar / i3blocks + rofi) and the
 GNOME Shell extension (gnome/timur-bar@crsstha).
 
   timur-bar refresh [--date YYYY-MM-DD]   Fetch entries, tasks, journal -> state.json
@@ -14,8 +14,8 @@ GNOME Shell extension (gnome/timur-bar@crsstha).
   timur-bar set-calendar [--window]       Prompt for Google Calendar secret iCal address(es)
   timur-bar clear-calendar                Unlink Google Calendar (learned tasks and hidden meetings are kept)
   timur-bar log-meetings '<json list>'    Log meetings as entries (add-entry fields + uid, title), remembering task/type
-  timur-bar dismiss-meeting <key>         Stop offering a meeting (not work); no network
-  timur-bar restore-meeting <key>         Offer a dismissed meeting again; no network
+  timur-bar dismiss-meeting <key>         Stop offering a meeting, and ones with its title, on any day (not work)
+  timur-bar restore-meeting <key>         Offer a dismissed meeting (and same-titled ones) again on every day
   timur-bar bar [--polybar|--i3blocks|--json]  Print the bar text from the cached state (no network)
   timur-bar timer start '<json>'          Start the ▶ timer: {"task", "label", "type", "description"}
   timur-bar timer pause|resume            Pause or continue it
@@ -35,6 +35,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -484,11 +485,13 @@ def calendar_meetings(text, owner, days):
     return found, skipped
 
 
-def fetch_meetings(urls, days):
-    """Meetings of all calendars for days; one per occurrence when calendars share an event."""
+def fetch_meetings(urls, days, downloads=None):
+    """Meetings of all calendars for days; one per occurrence when calendars share an event.
+    downloads: {url: future of its .ics text}, when refresh started them early."""
     found, skipped = {}, []
     for url in urls:
-        day_meetings, bad = calendar_meetings(fetch_ics(url), calendar_owner(url), days)
+        text = downloads[url].result() if downloads and url in downloads else fetch_ics(url)
+        day_meetings, bad = calendar_meetings(text, calendar_owner(url), days)
         skipped += bad
         for day, meetings in day_meetings.items():
             keys = {m["key"] for m in found.get(day, [])}
@@ -513,7 +516,7 @@ def suggestion(meeting, learned, task_ids):
     return {}
 
 
-def add_meetings(days_state, task_ids, previous):
+def add_meetings(days_state, task_ids, previous, downloads=None):
     """Put each day's meetings to log in days_state. Returns (configured, error). Calendar
     trouble never fails the refresh: the last meetings stay, and the error is shown with them."""
     urls = read_calendar_urls()
@@ -522,7 +525,7 @@ def add_meetings(days_state, task_ids, previous):
     saved = read_json(CALENDAR_STATE, {})
     error = ""
     try:
-        found, skipped = fetch_meetings(urls, list(days_state))
+        found, skipped = fetch_meetings(urls, list(days_state), downloads)
         if sorted(set(skipped)) != saved.get("skipped", []):
             saved["skipped"] = sorted(set(skipped))
             write_json(CALENDAR_STATE, saved)
@@ -533,12 +536,12 @@ def add_meetings(days_state, task_ids, previous):
         old = {day: (previous.get("days") or {}).get(day) or {} for day in days_state}
         found = {day: sorted((v.get("meetings") or []) + (v.get("hidden") or []), key=lambda m: m["start"])
                  for day, v in old.items()}
-    dismissed, learned = set(saved.get("dismissed") or []), saved.get("learned") or {}
+    learned = saved.get("learned") or {}
     for day, view in days_state.items():
         meetings = [{**m, "suggest": suggestion(m, learned, task_ids)}
                     for m in unlogged(found.get(day) or [], view["entries"], set())]
-        view["meetings"] = [m for m in meetings if m["key"] not in dismissed]
-        view["hidden"] = [m for m in meetings if m["key"] in dismissed]  # "not work", until restored
+        view["meetings"] = [m for m in meetings if not is_dismissed(m, saved)]
+        view["hidden"] = [m for m in meetings if is_dismissed(m, saved)]  # "not work", until restored
     return True, error
 
 
@@ -548,17 +551,23 @@ def refresh(date):
     today = dt.date.today()
     date = date or today.isoformat()
     previous = read_json(STATE, {})
+    # Requests run side by side: the calendar download (the slowest) starts first, then the
+    # Timur ones, so a refresh takes about as long as the slowest request rather than all of them.
+    pool = ThreadPoolExecutor(max_workers=8)
     try:
+        downloads = {url: pool.submit(fetch_ics, url) for url in read_calendar_urls()}
         me = ((gql(ME).get("public") or {}).get("me"))
         if not me:
             raise TimurError("Timur session expired — paste a new one", "auth")
-        meta = gql(ENUMS_AND_TASKS)
-        tasks = [{"id": t["id"], "label": task_label(t)}
-                 for t in (meta.get("private") or {}).get("allActiveTasks") or []]
+        meta = pool.submit(gql, ENUMS_AND_TASKS)
 
         # Recent tasks (most recent first) and each task's last-used type.
         days = [(today - dt.timedelta(days=o)).isoformat() for o in range(RECENT_DAYS + 1)]
-        by_day = {day: entries_for(day) for day in dict.fromkeys(days + [date])}
+        fetch_days = list(dict.fromkeys(days + [date]))
+        by_day = dict(zip(fetch_days, pool.map(entries_for, fetch_days)))
+        meta = meta.result()
+        tasks = [{"id": t["id"], "label": task_label(t)}
+                 for t in (meta.get("private") or {}).get("allActiveTasks") or []]
         recent, last_type = [], {}
         for day in days:  # newest day first
             for e in sorted(by_day[day], key=lambda e: int(e.get("id") or 0), reverse=True):
@@ -581,14 +590,15 @@ def refresh(date):
                 "type": e.get("type"),
             } for e in by_day[day]]
             return {"entries": entries, "totalMinutes": sum(e["duration"] for e in entries),
-                    "journal": journal_for(day)}
+                    "journal": journals[day]}
 
         # The panel can show today or yesterday; keep both fresh.
         # The last earlier day with entries, for the i3 panel's "Repeat" (Friday, on a Monday).
         previous_day = next((day for day in days[1:] if by_day[day]), None)
-        days_state = {day: day_view(day) for day in dict.fromkeys(
-            [today.isoformat(), days[1], date] + ([previous_day] if previous_day else []))}
-        calendar, calendar_error = add_meetings(days_state, {t["id"] for t in tasks}, previous)
+        view_days = list(dict.fromkeys([today.isoformat(), days[1], date] + ([previous_day] if previous_day else [])))
+        journals = dict(zip(view_days, pool.map(journal_for, view_days)))
+        days_state = {day: day_view(day) for day in view_days}
+        calendar, calendar_error = add_meetings(days_state, {t["id"] for t in tasks}, previous, downloads)
         # Monday..today totals for the i3 panel's week strip (already fetched above for recent tasks).
         week = [{"date": day, "minutes": sum(e.get("duration") or 0 for e in by_day[day])}
                 for day in reversed(days[:today.weekday() + 1])]
@@ -618,6 +628,8 @@ def refresh(date):
         state = {**previous, "ok": False, "error": str(e), "errorKind": e.kind}
         write_json(STATE, state)
         return {"ok": False, "error": str(e), "errorKind": e.kind}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def new_ulid():
@@ -712,30 +724,72 @@ def log_meetings(payload):
     return result
 
 
-def move_meeting(key, source, target):
-    """Move a meeting between a day's "meetings" and "hidden" lists in state.json, so the panel follows at once."""
+def series_uid(key):
+    """The calendar event a meeting key ("uid|2026-10-13T11:00") belongs to: every day of a repeating one."""
+    return key.rsplit("|", 1)[0]
+
+
+def meeting_marks(meeting):
+    """What hiding a meeting matches: its event (every day it repeats) and its title (any event called the same),
+    keyed like "learned"."""
+    marks = [f"uid:{meeting.get('uid') or series_uid(meeting['key'])}"]
+    if meeting.get("title"):
+        marks.append(f"title:{meeting['title'].casefold()}")
+    return marks
+
+
+def is_dismissed(meeting, saved):
+    """Hidden as not work: same event or same title as one hidden with ✕ (dismissedEvents), or this one day
+    (dismissed, kept from before)."""
+    hidden = set(saved.get("dismissedEvents") or [])
+    return bool(hidden.intersection(meeting_marks(meeting))) or meeting["key"] in (saved.get("dismissed") or [])
+
+
+def find_meeting(key):
+    """The meeting with key in state.json (shown or hidden), or just its key when it's not there."""
+    for view in (read_json(STATE, {}).get("days") or {}).values():
+        for m in (view.get("meetings") or []) + (view.get("hidden") or []):
+            if m["key"] == key:
+                return m
+    return {"key": key}
+
+
+def move_meeting(meeting, source, target):
+    """Move every meeting like this one (same event or title, on any day) between a day's "meetings" and
+    "hidden" lists in state.json, so the panel follows at once."""
+    marks = set(meeting_marks(meeting))
+
+    def matches(m):
+        return m["key"] == meeting["key"] or bool(marks.intersection(meeting_marks(m)))
+
     state = read_json(STATE, {})
     for view in (state.get("days") or {}).values():
-        moving = [m for m in view.get(source) or [] if m["key"] == key]
-        view[source] = [m for m in view.get(source) or [] if m["key"] != key]
+        moving = [m for m in view.get(source) or [] if matches(m)]
+        view[source] = [m for m in view.get(source) or [] if not matches(m)]
         view[target] = sorted((view.get(target) or []) + moving, key=lambda m: m["start"])
     write_json(STATE, state)
 
 
 def dismiss_meeting(key):
-    """Stop offering a meeting (it isn't work). restore_meeting brings it back."""
+    """Stop offering a meeting, and any meeting with its event or title, on every day (it isn't work).
+    restore_meeting brings them back."""
+    meeting = find_meeting(key)
+    marks = meeting_marks(meeting)
     saved = read_json(CALENDAR_STATE, {})
-    saved["dismissed"] = ([k for k in saved.get("dismissed") or [] if k != key] + [key])[-500:]
+    saved["dismissedEvents"] = ([m for m in saved.get("dismissedEvents") or [] if m not in marks] + marks)[-500:]
     write_json(CALENDAR_STATE, saved)
-    move_meeting(key, "meetings", "hidden")
+    move_meeting(meeting, "meetings", "hidden")
     return {"ok": True}
 
 
 def restore_meeting(key):
+    meeting = find_meeting(key)
+    marks, uid = meeting_marks(meeting), series_uid(key)
     saved = read_json(CALENDAR_STATE, {})
-    saved["dismissed"] = [k for k in saved.get("dismissed") or [] if k != key]
+    saved["dismissedEvents"] = [m for m in saved.get("dismissedEvents") or [] if m not in marks]
+    saved["dismissed"] = [k for k in saved.get("dismissed") or [] if series_uid(k) != uid]
     write_json(CALENDAR_STATE, saved)
-    move_meeting(key, "hidden", "meetings")
+    move_meeting(meeting, "hidden", "meetings")
     return {"ok": True}
 
 

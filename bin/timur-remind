@@ -29,7 +29,7 @@ I3_PANEL = Path(__file__).resolve().parent.parent / "i3" / "timur-panel"
 
 def open_panel():
     if shutil.which("omarchy-shell"):
-        return ["omarchy-shell", "crsstha.timur", "entry"]
+        return ["omarchy-shell", "togglecorp.timur", "entry"]
     return [str(I3_PANEL)]
 
 
