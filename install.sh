@@ -71,6 +71,7 @@ chmod +x "$REPO/bin/"* "$REPO/i3/timur-panel" "$REPO/i3/timur-menu" "$REPO/i3/i3
 echo "--> Scripts"
 link "$REPO/bin/timur-bar" "$BIN/timur-bar"
 link "$REPO/bin/timur-remind" "$BIN/timur-remind"
+link "$REPO/bin/timur-restart" "$BIN/timur-restart"
 
 echo "--> Background refresh (systemd user timer)"
 for unit in "$REPO"/systemd/*; do link "$unit" "$UNITS/$(basename "$unit")"; done

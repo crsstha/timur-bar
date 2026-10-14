@@ -2,6 +2,7 @@
 """Add or remove timur-bar's GNOME keyboard shortcuts (Settings → Keyboard → Custom Shortcuts).
 
   keybindings.py add      Super+Alt+T log time · Super+Alt+J journal note · Super+Alt+Q quick log (needs rofi)
+                          Super+Alt+R restart after git pull
   keybindings.py remove   take them out again (used by uninstall.sh)
 
 Only touches entries under …/custom-keybindings/timur-bar-*/, so your own shortcuts are kept.
@@ -21,6 +22,7 @@ BINDINGS = {  # path suffix: (name, command, accelerator)
     "timur-bar-panel": ("Timur: log time", f"{BIN}/timur-panel", "<Super><Alt>t"),
     "timur-bar-journal": ("Timur: journal note", f"{BIN}/timur-panel journal", "<Super><Alt>j"),
     "timur-bar-quick": ("Timur: quick log", f"{BIN}/timur-menu quick", "<Super><Alt>q"),
+    "timur-bar-restart": ("Timur: restart after git pull", f"{BIN}/timur-restart", "<Super><Alt>r"),
 }
 
 
