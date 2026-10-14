@@ -212,7 +212,7 @@ with tempfile.TemporaryDirectory() as home:
     assert bar.add_meetings(days_state, set(), previous) == (True, "Can't reach Google Calendar")
     assert [m["start"][11:16] for m in days_state["2026-10-13"]["meetings"]] == ["11:00", "12:45", "14:00", "15:00", "15:45"]
 
-    # log-meetings learns task/type; dismiss-meeting drops it from state.json at once.
+    # log-meetings learns task/type; dismiss-meeting drops its event and title from every day in state.json at once.
     added = []
     bar.add_entry = lambda payload: added.append(json.loads(payload)) or {"ok": True}
     bar.log_meetings(json.dumps([{"task": 7, "type": "INTERNAL_MEETING", "duration": 30, "date": "2026-10-13",
@@ -225,17 +225,41 @@ with tempfile.TemporaryDirectory() as home:
     assert bar.dismiss_meeting(key) == {"ok": True}
     day_view = json.loads(bar.STATE.read_text())["days"]["2026-10-13"]
     assert key not in [m["key"] for m in day_view["meetings"]] and key in [m["key"] for m in day_view["hidden"]]
-    assert key in json.loads(bar.CALENDAR_STATE.read_text())["dismissed"]
+    uid, title = bar.series_uid(key), day_view["hidden"][0]["title"]
+    assert json.loads(bar.CALENDAR_STATE.read_text())["dismissedEvents"] == [f"uid:{uid}", f"title:{title.casefold()}"]
+    # Another event with the same title (any case) is hidden too; other titles aren't.
+    saved = json.loads(bar.CALENDAR_STATE.read_text())
+    assert bar.is_dismissed({"key": "other@google.com|2026-10-20T13:00", "uid": "other@google.com",
+                             "title": title.upper()}, saved)
+    assert not bar.is_dismissed({"key": "other@google.com|2026-10-20T13:00", "uid": "other@google.com",
+                                 "title": "Something else"}, saved)
 
-    # A refresh keeps it hidden (not dropped), and restore-meeting brings it back in time order.
+    def offered(days):
+        return {d: [m["title"] for m in v["meetings"] if m["uid"] == uid] for d, v in days.items() if v.get("meetings")}
+
+    def hidden(days):
+        return {d: [m["title"] for m in v["hidden"] if m["uid"] == uid] for d, v in days.items() if v.get("hidden")}
+
+    # A refresh hides that event on every day it's on (not dropped), and restore-meeting brings it all back.
     bar.fetch_ics = lambda url: ICS
     days_state = {d: {"entries": []} for d in DAYS}
     bar.add_meetings(days_state, set(), {})
-    assert key in [m["key"] for m in days_state["2026-10-13"]["hidden"]]
-    assert key not in [m["key"] for m in days_state["2026-10-13"]["meetings"]]
+    assert not any(offered(days_state).values())
+    assert len([d for d, titles in hidden(days_state).items() if titles]) > 1  # a repeating event: several days
+    bar.write_json(bar.STATE, {"days": days_state})
     assert bar.restore_meeting(key) == {"ok": True}
-    day_view = json.loads(bar.STATE.read_text())["days"]["2026-10-13"]
+    days_view = json.loads(bar.STATE.read_text())["days"]
+    assert not any(hidden(days_view).values()) and len([d for d, t in offered(days_view).items() if t]) > 1
+    day_view = days_view["2026-10-13"]
     assert key in [m["key"] for m in day_view["meetings"]] and not day_view["hidden"]
     assert [m["start"] for m in day_view["meetings"]] == sorted(m["start"] for m in day_view["meetings"])
-    assert key not in json.loads(bar.CALENDAR_STATE.read_text())["dismissed"]
+    assert json.loads(bar.CALENDAR_STATE.read_text())["dismissedEvents"] == []
+
+    # Meetings hidden one day at a time before this still stay hidden, and restore clears them too.
+    bar.write_json(bar.CALENDAR_STATE, {"dismissed": [key]})
+    days_state = {d: {"entries": []} for d in DAYS}
+    bar.add_meetings(days_state, set(), {})
+    assert key in [m["key"] for m in days_state["2026-10-13"]["hidden"]]
+    bar.restore_meeting(key)
+    assert json.loads(bar.CALENDAR_STATE.read_text())["dismissed"] == []
 print("calendar ok")

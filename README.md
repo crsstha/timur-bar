@@ -708,25 +708,25 @@ The secret address lets anyone read your calendar, so treat it like a password. 
 
 **Use it:** the **Meetings** section above **Logged today** shows meetings that:
 
-* have started (later ones appear once they begin; one still going on starts unticked),
+* are on that day, upcoming ones too (one that hasn't ended yet starts unticked),
 * have a start and end time (all-day events like holidays are left out),
 * you haven't declined,
 * and have no entry yet that starts at the same time.
 
-Each meeting is logged as a DONE entry with the meeting title as description, its length as duration (change it if the meeting ran short or long), and its start time. Pick a task and type for a new meeting; the next time the same meeting (or one with the same title) comes up, they are filled in and it is ticked. **⚠** means it overlaps an earlier meeting. **✕** hides a meeting that wasn't work, for good.
+Each meeting is logged as a DONE entry with the meeting title as description, its length as duration (change it if the meeting ran short or long), and its start time. Pick a task and type for a new meeting; the next time the same meeting (or one with the same title) comes up, they are filled in and it is ticked. **⚠** means it overlaps an earlier meeting. **✕** hides a meeting that wasn't work, and every meeting with the same title, on every day, until you restore it from **hidden**.
 
 Google can take a few hours to update the secret address after you change a meeting. Repeating meetings with an unusual rule are left out and named in `~/.cache/timur-bar/log`.
 
-To stop, use **⚙ → Unlink Google Calendar…** in the panel (Omarchy shows ⚙'s choices as a row of buttons under the header) (or `timur-bar clear-calendar`). The tasks it learned and the meetings you hid are kept, in case you link it again.
+To stop, use **⚙ → Unlink Google Calendar…** in the panel (or `timur-bar clear-calendar`). The tasks it learned and the meetings you hid are kept, in case you link it again.
 
 ### Themes
 
-On i3 and GNOME, **⚙ → Appearance…** in the panel opens its settings:
+On Omarchy, i3 and GNOME, **⚙ → Appearance…** in the panel opens its settings:
 
-* **Auto / Light / Dark** — Auto follows your desktop's light or dark style, and switches when the desktop does.
-* **Light theme** and **Dark theme** — the one used in each mode: Desktop (your GTK theme's own colours and accent), Tokyo Night (the original look), Terracotta, Catppuccin, Gruvbox, Monokai or Solarized.
+* **Auto / Light / Dark** — Auto follows your desktop's light or dark style, and switches when the desktop does. On Omarchy it goes by how bright the Omarchy theme is.
+* **Light theme** and **Dark theme** — the one used in each mode: Desktop (your GTK or Omarchy theme's own colours and accent), Tokyo Night (the original look), Terracotta, Catppuccin, Gruvbox, Monokai or Solarized.
 
-Choices apply at once and are saved in `~/.config/timur-bar/settings`. Only the panel changes: the bar text keeps following your bar or GNOME's top bar, and on Omarchy the panel follows the Omarchy theme.
+Choices apply at once and are saved in `~/.config/timur-bar/settings`. All three panels read the same file, so a choice made in one shows in the others. Only the panel changes: the bar text keeps following your bar or GNOME's top bar.
 
 ## Setting it up for someone else / on another computer
 
@@ -1026,7 +1026,10 @@ timur-bar log-meetings '[{…add-entry fields…,"startTime":"10:00:00","uid":"�
 # Log meetings and remember their task and type
 
 timur-bar dismiss-meeting <key>
-# Stop offering a meeting (no network request)
+# Stop offering a meeting, and ones with the same title, on every day (no network request)
+
+timur-bar restore-meeting <key>
+# Offer a dismissed meeting, and ones with the same title, again on every day (no network request)
 
 timur-panel [journal] [--yesterday]
 # i3 and GNOME: open or close the Timur panel
