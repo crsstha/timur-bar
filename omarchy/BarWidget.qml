@@ -4,7 +4,7 @@ import qs.Ui
 
 BarWidget {
   id: root
-  moduleName: "crsstha.timur"
+  moduleName: "togglecorp.timur"
 
   function injectPanel() {
     var target = panelLoader.item
