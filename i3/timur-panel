@@ -36,11 +36,13 @@ STATE = Path.home() / ".cache/timur-bar/state.json"
 TIMER = STATE.with_name("timer.json")
 WEB_APP = "https://timur.dev.togglecorp.com/"
 WIDTH = 520
+MIN_WIDTH = 460
 MAX_TASK_ROWS = 4
 EXPIRY_WARN_DAYS = 3
 STATUS_ORDER = ["TODO", "DOING", "DONE"]
 QUICK_DURATIONS = ["15m", "30m", "1h", "2h", "4h"]
 UNDO_SECONDS = 10
+MEETING_ROWS, ENTRY_ROWS = 6, 8  # rows shown before Meetings / Logged today scroll
 EDGE_GAP = 8  # pixels between the panel and the monitor's right edge
 TOP_OFFSET = int(os.environ.get("TIMUR_PANEL_OFFSET", "30"))
 WEEK_TARGET = float(os.environ.get("TIMUR_WEEK_TARGET", "40"))
@@ -55,33 +57,221 @@ def find_cli():
 
 CLI = find_cli()
 
+# The look, in colour slots (@tb_*) that the theme fills in: see THEMES and theme_css.
 CSS = b"""
-window.timur { background: #1b1e26; border: 2px solid #7aa2f7; }
-.timur * { color: #c0c5ce; font-family: monospace; font-size: 10pt; text-shadow: none; -gtk-icon-shadow: none; }
+window.timur { background: @tb_bg; border: 2px solid @tb_accent; }
+.timur * { color: @tb_fg; font-family: monospace; font-size: 10pt; text-shadow: none; -gtk-icon-shadow: none; }
 .timur .title { font-weight: bold; font-size: 12pt; }
-.timur .section { color: #7c8494; font-size: 9pt; letter-spacing: 1px; }
-.timur .dim { color: #7c8494; }
-.timur .accent { color: #7aa2f7; }
-.timur .urgent { color: #e06c75; }
-.timur .banner { background: #232a3d; border-radius: 3px; padding: 4px 8px; }
-.timur entry { background: #232733; border: 1px solid #3b4252; border-radius: 3px; padding: 4px 8px;
+.timur .section { color: @tb_dim; font-size: 9pt; letter-spacing: 1px; }
+.timur .dim { color: @tb_dim; }
+.timur .accent { color: @tb_accent; }
+.timur .urgent { color: @tb_urgent; }
+.timur .banner { background: @tb_banner; border-radius: 3px; padding: 4px 8px; }
+.timur entry { background: @tb_surface; border: 1px solid @tb_field_border; border-radius: 3px; padding: 4px 8px;
                box-shadow: none; min-height: 22px; }
-.timur entry:focus { border-color: #7aa2f7; }
-.timur button { background: #1b1e26; background-image: none; border: 1px solid #4c566a; border-radius: 3px;
+.timur entry:focus { border-color: @tb_accent; }
+.timur entry selection { background: @tb_accent; color: @tb_bg; }
+.timur button { background: @tb_bg; background-image: none; border: 1px solid @tb_line; border-radius: 3px;
                 padding: 3px 10px; box-shadow: none; min-height: 22px; }
-.timur button:hover { background: #2a2f3c; }
-.timur button:checked { background: #353b4a; border-color: #7c8494; }
+.timur button:hover { background: @tb_hover; }
+.timur button:checked { background: @tb_checked; border-color: @tb_dim; }
 .timur button:disabled { opacity: 0.5; }
 .timur button.flat { border-color: transparent; padding: 1px 6px; min-height: 0; }
-.timur button.flat:hover { border-color: #4c566a; }
+.timur button.flat:hover { border-color: @tb_line; }
+.timur check, .timur radio { background: @tb_surface; background-image: none; border: 1px solid @tb_line; color: @tb_bg; }
+.timur check:checked, .timur radio:checked { background: @tb_accent; border-color: @tb_accent; }
 .timur list, .timur row { background: transparent; }
 .timur row { padding: 3px 8px; border-radius: 3px; }
-.timur row:selected, .timur row:hover { background: #262c3a; }
-.timur row.editing { background: #232a3d; }
-.timur textview, .timur textview text { background: #1b1e26; }
-.timur separator { background: #2e3440; min-height: 1px; }
-.timur menu, .timur menuitem { background: #232733; }
+.timur row:selected, .timur row:hover { background: @tb_row; }
+.timur row.editing { background: @tb_banner; }
+.timur textview, .timur textview text { background: @tb_bg; }
+.timur separator { background: @tb_sep; min-height: 1px; }
+.timur menu, .timur menuitem { background: @tb_surface; }
+.timur .compact, .timur .compact button { padding: 0 4px; min-height: 18px; }
+.timur .problem, .timur .problem button { border-color: @tb_urgent; }
+.timur .settings image, .timur .settings label { color: @tb_dim; }
+.timur .settings:hover image, .timur .settings:checked image,
+.timur .settings:hover label, .timur .settings:checked label { color: @tb_accent; }
+.timur menuitem { padding: 4px 10px; }
+.timur menuitem:hover { background: @tb_hover; }
+.timur menuitem:disabled image, .timur menuitem:disabled label { color: @tb_line; }
+.timur .theme-choice { padding: 2px 4px; }
 """
+
+# Themes: a light and a dark variant per family. Seven slots each; the rest is mixed from them in
+# theme_css (an "exact" dict pins slots, so Tokyo Night dark stays the panel's original look).
+# Published palettes: Tokyo Night (Day/Night), Catppuccin (Latte/Mocha), Gruvbox, Monokai Pro
+# (Light filter/dark), Solarized. Terracotta is our own. "desktop" uses the GTK theme's colours.
+THEMES = {
+    "desktop": ("Desktop", None, None),
+    "tokyo-night": ("Tokyo Night",
+                    dict(bg="#e1e2e7", surface="#d5d6db", fg="#343b58", dim="#6172b0", accent="#2e7de9",
+                         urgent="#c4295b", line="#a8aecb", alt="#587539"),
+                    dict(bg="#1b1e26", surface="#232733", fg="#c0c5ce", dim="#7c8494", accent="#7aa2f7",
+                         urgent="#e06c75", line="#4c566a", alt="#9ece6a",
+                         exact=dict(banner="#232a3d", hover="#2a2f3c", checked="#353b4a", row="#262c3a",
+                                    sep="#2e3440", field_border="#3b4252"))),
+    "terracotta": ("Terracotta",
+                   dict(bg="#f7f3ee", surface="#ece4da", fg="#3b2f2a", dim="#7a6a5f", accent="#a8482a",
+                        urgent="#a3221a", line="#d2c3b3", alt="#5f7232"),
+                   dict(bg="#1f1a17", surface="#2b2420", fg="#e8ddd3", dim="#a3948a", accent="#e07a52",
+                        urgent="#f2685c", line="#4a3f38", alt="#a8b864")),
+    "catppuccin": ("Catppuccin",
+                   dict(bg="#eff1f5", surface="#e6e9ef", fg="#4c4f69", dim="#6c6f85", accent="#8839ef",
+                        urgent="#d20f39", line="#bcc0cc", alt="#1e66f5"),
+                   dict(bg="#1e1e2e", surface="#313244", fg="#cdd6f4", dim="#9399b2", accent="#cba6f7",
+                        urgent="#f38ba8", line="#45475a", alt="#89b4fa")),
+    "gruvbox": ("Gruvbox",
+                dict(bg="#fbf1c7", surface="#ebdbb2", fg="#3c3836", dim="#7c6f64", accent="#af3a03",
+                     urgent="#9d0006", line="#d5c4a1", alt="#b57614"),
+                dict(bg="#282828", surface="#3c3836", fg="#ebdbb2", dim="#a89984", accent="#fe8019",
+                     urgent="#fb4934", line="#504945", alt="#fabd2f")),
+    "monokai": ("Monokai",
+                dict(bg="#faf4f2", surface="#ede7e5", fg="#29242a", dim="#706b6e", accent="#c4462a",
+                     urgent="#c7365f", line="#d3cdcc", alt="#cc7a0a"),
+                dict(bg="#2d2a2e", surface="#403e41", fg="#fcfcfa", dim="#939293", accent="#ffd866",
+                     urgent="#ff6188", line="#5b595c", alt="#fc9867")),
+    "solarized": ("Solarized",
+                  dict(bg="#fdf6e3", surface="#eee8d5", fg="#4f646c", dim="#657b83", accent="#268bd2",
+                       urgent="#dc322f", line="#d6ceb5", alt="#2aa198"),
+                  dict(bg="#002b36", surface="#073642", fg="#93a1a1", dim="#839496", accent="#268bd2",
+                       urgent="#dc322f", line="#586e75", alt="#2aa198")),
+}
+DEFAULT_THEME = {"mode": "auto", "light": "solarized", "dark": "tokyo-night"}
+FALLBACK_THEME = {False: "solarized", True: "tokyo-night"}  # when "desktop" has no light/dark sibling
+
+# Slots mixed from the seven, for any theme without them pinned: GTK's mix(a, b, f) = a + f·(b − a).
+MIXED = {"banner": "mix(@tb_bg, @tb_accent, 0.12)", "hover": "mix(@tb_bg, @tb_fg, 0.08)",
+         "checked": "mix(@tb_bg, @tb_fg, 0.16)", "row": "mix(@tb_bg, @tb_fg, 0.06)",
+         "sep": "mix(@tb_bg, @tb_fg, 0.12)", "field_border": "mix(@tb_bg, @tb_fg, 0.22)"}
+# "desktop": the GTK theme's own colours (your accent too).
+DESKTOP_SLOTS = {"bg": "@theme_bg_color", "surface": "@theme_base_color", "fg": "@theme_fg_color",
+                 "dim": "mix(@theme_fg_color, @theme_bg_color, 0.4)", "accent": "@theme_selected_bg_color",
+                 "urgent": "@error_color", "line": "mix(@theme_fg_color, @theme_bg_color, 0.7)"}
+
+
+def theme_css(palette):
+    """@define-color lines for a palette dict (or None for the desktop's colours)."""
+    slots = dict(DESKTOP_SLOTS) if palette is None else {k: palette[k] for k in DESKTOP_SLOTS}
+    slots.update({k: v for k, v in MIXED.items()})
+    if palette:
+        slots.update(palette.get("exact") or {})
+    return "".join(f"@define-color tb_{k} {v};\n" for k, v in slots.items()).encode()
+
+
+def swatch(key, variant):
+    """Four colour blocks (background, accent, second accent, warning) — CSS, so no cairo is needed.
+    The desktop's use the GTK theme's named colours, so they follow it."""
+    palette = THEMES[key][1 if variant == "light" else 2]
+    colours = [palette[k] for k in ("bg", "accent", "alt", "urgent")] if palette else \
+        ["@theme_bg_color", "@theme_selected_bg_color", "@theme_fg_color", "@error_color"]
+    strip = Gtk.Box()
+    for colour in colours:
+        block = Gtk.Box()
+        block.set_size_request(14, 14)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(f"box {{ background: {colour}; }}".encode())
+        block.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        strip.pack_start(block, False, False, 0)
+    frame = Gtk.Frame()  # a thin outline, so a background-coloured block still shows
+    frame.add(strip)
+    return frame
+
+
+SETTINGS = Path.home() / ".config/timur-bar/settings"  # mode= light= dark= (key=value lines)
+
+
+def read_settings():
+    values = dict(DEFAULT_THEME)
+    try:
+        for line in SETTINGS.read_text().splitlines():
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    except OSError:
+        pass
+    if values["mode"] not in ("auto", "light", "dark"):
+        values["mode"] = DEFAULT_THEME["mode"]
+    for variant in ("light", "dark"):
+        if values[variant] not in THEMES:
+            values[variant] = DEFAULT_THEME[variant]
+    return values
+
+
+def write_settings(values):
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS.write_text("".join(f"{k}={values[k]}\n" for k in ("mode", "light", "dark")))
+
+
+def gtk_theme_installed(name):
+    return any((base / name / "gtk-3.0").is_dir() for base in
+               (Path.home() / ".themes", Path.home() / ".local/share/themes", Path("/usr/share/themes")))
+
+
+def theme_sibling(name, dark):
+    """The light or dark variant of a GTK theme (Yaru-prussiangreen <-> Yaru-prussiangreen-dark), if installed."""
+    base = name[:-5] if name.endswith("-dark") else name
+    wanted = f"{base}-dark" if dark else base
+    return wanted if wanted == name or gtk_theme_installed(wanted) else None
+
+
+class Appearance:
+    """The panel's theme: colour slots for the chosen light or dark theme, and Auto following the desktop.
+    Changes only this panel — the GTK theme swap (for tick boxes and menus) is for this process alone."""
+
+    def __init__(self, on_change):
+        self.on_change = on_change
+        self.settings = read_settings()
+        self.gtk = Gtk.Settings.get_default()
+        self.desktop_theme = self.gtk.props.gtk_theme_name
+        screen = Gdk.Screen.get_default()
+        self.colours, rules = Gtk.CssProvider(), Gtk.CssProvider()
+        rules.load_from_data(CSS)
+        for provider in (self.colours, rules):
+            Gtk.StyleContext.add_provider_for_screen(screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.portal = None
+        try:  # the desktop's light/dark setting, on GNOME, KDE, and i3 with xdg-desktop-portal-gtk
+            self.portal = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION, Gio.DBusProxyFlags.DO_NOT_AUTO_START, None, "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Settings", None)
+            self.portal.connect("g-signal", self.on_portal_signal)
+        except GLib.Error:
+            pass
+        self.dark, self.key, self.fallback = True, "tokyo-night", False
+        self.apply()
+
+    def desktop_dark(self):
+        """1 = dark, 2 = light in the portal; with no portal (or no preference) the GTK theme name decides."""
+        if self.portal:
+            try:
+                value = self.portal.call_sync("ReadOne", GLib.Variant("(ss)", ("org.freedesktop.appearance", "color-scheme")),
+                                              Gio.DBusCallFlags.NONE, 500, None).unpack()[0]
+                if value in (1, 2):
+                    return value == 1
+            except GLib.Error:
+                pass
+        return "dark" in self.desktop_theme.lower()
+
+    def on_portal_signal(self, proxy, sender, signal, params):
+        if signal == "SettingChanged" and tuple(params.unpack()[:2]) == ("org.freedesktop.appearance", "color-scheme") \
+                and self.settings["mode"] == "auto":
+            self.apply()
+            self.on_change()
+
+    def apply(self):
+        mode = self.settings["mode"]
+        self.dark = self.desktop_dark() if mode == "auto" else mode == "dark"
+        key = self.settings["dark" if self.dark else "light"]
+        sibling = theme_sibling(self.desktop_theme, self.dark)
+        if sibling and self.gtk.props.gtk_theme_name != sibling:
+            self.gtk.props.gtk_theme_name = sibling
+        self.fallback = key == "desktop" and not sibling
+        self.key = FALLBACK_THEME[self.dark] if self.fallback else key
+        self.colours.load_from_data(theme_css(None if self.key == "desktop" else THEMES[self.key][2 if self.dark else 1]))
+
+    def set(self, **values):
+        self.settings.update(values)
+        write_settings(self.settings)
+        self.apply()
 
 
 def iso(day):
@@ -152,6 +342,68 @@ def notify(summary, icon="appointment-new"):
     subprocess.Popen(["notify-send", "--app-name=Timur", f"--icon={icon}", "Timur", summary])
 
 
+def short_type(text):
+    """'Meeting Internal' -> 'Meet·I', 'Development' -> 'Deve': the type, small enough for a meeting line."""
+    words = text.split()
+    return words[0][:4] + (f"·{words[1][0]}" if len(words) > 1 else "") if words else "Type"
+
+
+def capped(child):
+    """A scroller around child, sized by set_rows / fit_to_screen (no horizontal scroll).
+    Their sizes go in both min and max content height: a non-resizable GTK3 window may take
+    its minimum size, and a scroller's own minimum is almost nothing."""
+    scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+    scroller.set_propagate_natural_height(True)
+    scroller.add(child)
+    return scroller
+
+
+def set_rows(scroller, rows, count, spacing=0):
+    """Cap scroller at count rows, measured from the first one (fonts differ between setups)."""
+    scroller.set_min_content_height(-1)
+    if rows:
+        height = min(len(rows), count) * (rows[0].get_preferred_height()[1] + spacing)
+        scroller.set_max_content_height(max(1, height))
+        scroller.set_min_content_height(max(1, height))
+
+
+def keep_scroll(scroller, rebuild):
+    """Run rebuild without the list jumping back to the top."""
+    adjustment = scroller.get_vadjustment()
+    value = adjustment.get_value()
+    rebuild()
+    GLib.idle_add(lambda: adjustment.set_value(min(value, adjustment.get_upper() - adjustment.get_page_size())) and False)
+
+
+CONFIRM = {  # ⚙ action -> (question, button)
+    "session": ("Sign out of Timur on this computer? Nothing changes in Timur.", "Clear session"),
+    "calendar": ("Unlink Google Calendar? Your calendar itself is untouched.", "Unlink"),
+}
+
+
+def icon(name, fallback):
+    """A theme icon (symbolic ones take the text colour), or fallback text where the theme lacks it."""
+    if Gtk.IconTheme.get_default().has_icon(name):
+        return Gtk.Image.new_from_icon_name(name, Gtk.IconSize.MENU)
+    return label(fallback)
+
+
+def menu_item(icon_name, text):
+    item = Gtk.MenuItem()
+    box = Gtk.Box(spacing=8)
+    if Gtk.IconTheme.get_default().has_icon(icon_name):
+        box.pack_start(Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU), False, False, 0)
+    box.pack_start(label(text), False, False, 0)
+    item.add(box)
+    return item
+
+
+def short_task(text):
+    """'MapSwipe › Run Maintenance › RN Upgrade' -> 'MapSwipe › RN Upgrade': project and task fit a meeting line."""
+    parts = text.split(" › ")
+    return f"{parts[0]} › {parts[-1]}" if len(parts) > 2 else text
+
+
 def label(text="", *classes, xalign=0.0, ellipsize=None, chars=None, wrap=False):
     widget = Gtk.Label(label=text, xalign=xalign)
     for c in classes:
@@ -163,8 +415,10 @@ def label(text="", *classes, xalign=0.0, ellipsize=None, chars=None, wrap=False)
         widget.set_width_chars(chars)
         widget.set_max_width_chars(chars)
     if wrap:
+        # Wrap to the width the rest of the panel sets. A wrapping label asks for max_width_chars
+        # of width, so anything bigger (a confirmation, a long error) would widen the whole panel.
         widget.set_line_wrap(True)
-        widget.set_max_width_chars(60)
+        widget.set_max_width_chars(1)
     return widget
 
 
@@ -218,6 +472,13 @@ class Panel(Gtk.ApplicationWindow):
         self.syncing = True  # True while build()/render() set widgets, so their signals don't feed back
         self.fetched = set()  # days asked for since the last good refresh, so a failing fetch doesn't loop
         self.anchor = None  # (monitor right edge, top) the panel's top-right corner sticks to
+        self.meeting_picks = {}  # meeting key -> {"on", "duration", "task", "type"} chosen in the Meetings list
+        self.meetings_shown = None  # what the Meetings list was built for; rebuilt only when that changes
+        self.meeting_rows = {}  # meeting key -> {"row", "check", "task", "type", "duration"} widgets
+        self.picking_for = None  # meeting keys (or "ticked") the task search is picking a task for
+        self.screen_height = 0  # room below the bar on the panel's monitor, set when it opens
+        self.settings_open = False  # the Settings page (⚙ → Appearance…) instead of the tabs
+        self.appearance = Appearance(self.on_theme_changed)
 
         self.build()
         self.syncing = False
@@ -236,6 +497,7 @@ class Panel(Gtk.ApplicationWindow):
 
     def build(self):
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
+        body.set_size_request(MIN_WIDTH, -1)  # wrapped text (sign-in help, confirmations) never sets the width
 
         header = Gtk.Box(spacing=8)
         header.pack_start(label("Timur", "title"), False, False, 0)
@@ -243,6 +505,28 @@ class Panel(Gtk.ApplicationWindow):
         web.get_style_context().add_class("flat")
         web.connect("clicked", self.open_web_app)
         header.pack_start(web, False, False, 0)
+        self.calendar_link = Gtk.Button()  # label set in render: "Link calendar" until one is linked
+        self.calendar_link.get_style_context().add_class("flat")
+        self.calendar_link.connect("clicked", self.set_up_calendar)
+        header.pack_start(self.calendar_link, False, False, 0)
+        self.settings = Gtk.MenuButton(tooltip_text="Settings")
+        for c in ("flat", "settings"):
+            self.settings.get_style_context().add_class(c)
+        self.settings.add(icon("emblem-system-symbolic", "⚙"))
+        menu = Gtk.Menu()
+        appearance = menu_item("preferences-desktop-appearance-symbolic", "Appearance…")
+        appearance.connect("activate", lambda *a: self.open_settings(True))
+        menu.append(appearance)
+        menu.append(Gtk.SeparatorMenuItem())
+        self.clear_session_item = menu_item("system-log-out-symbolic", "Clear Timur session…")
+        self.clear_session_item.connect("activate", lambda *a: self.ask_confirm("session"))
+        menu.append(self.clear_session_item)
+        self.clear_calendar_item = menu_item("x-office-calendar-symbolic", "Unlink Google Calendar…")
+        self.clear_calendar_item.connect("activate", lambda *a: self.ask_confirm("calendar"))
+        menu.append(self.clear_calendar_item)
+        menu.show_all()
+        self.settings.set_popup(menu)
+        header.pack_start(self.settings, False, False, 0)
         self.next_day = Gtk.Button(label="›", tooltip_text="Next day (Ctrl+PgDn)")
         self.next_day.connect("clicked", lambda *a: self.set_day(self.day_offset + 1))
         header.pack_end(self.next_day, False, False, 0)
@@ -260,6 +544,21 @@ class Panel(Gtk.ApplicationWindow):
         header.pack_end(self.day_total, False, False, 0)
         body.pack_start(header, False, False, 0)
 
+        # Confirmation for the ⚙ actions, in the panel: a dialog would take focus, and the panel closes then.
+        self.confirm = None  # "session" | "calendar" while asking
+        self.confirm_box = Gtk.Box(spacing=6)
+        self.confirm_box.get_style_context().add_class("banner")
+        self.confirm_text = label("", wrap=True)
+        self.confirm_box.pack_start(self.confirm_text, True, True, 0)
+        self.confirm_yes = Gtk.Button(valign=Gtk.Align.CENTER)
+        self.confirm_yes.add(label("", "urgent"))
+        self.confirm_yes.connect("clicked", lambda *a: self.confirmed())
+        self.confirm_box.pack_end(self.confirm_yes, False, False, 0)
+        cancel = Gtk.Button(label="Cancel", valign=Gtk.Align.CENTER)
+        cancel.connect("clicked", lambda *a: self.ask_confirm(None))
+        self.confirm_box.pack_end(cancel, False, False, 0)
+        body.pack_start(self.confirm_box, False, False, 0)
+
         self.week_box = Gtk.Box(spacing=2)  # filled by render_week
         body.pack_start(self.week_box, False, False, 0)
 
@@ -270,6 +569,8 @@ class Panel(Gtk.ApplicationWindow):
         self.session_box.pack_start(self.session_text, False, False, 0)
         self.session_box.pack_start(self.session_button, False, False, 0)
         body.pack_start(self.session_box, False, False, 0)
+        self.settings_page = self.build_settings_page()
+        body.pack_start(self.settings_page, False, False, 0)
 
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         tabs, self.tab_buttons = toggle_group([("entry", "Time entry"), ("journal", "Journal note")], self.set_tab)
@@ -281,8 +582,54 @@ class Panel(Gtk.ApplicationWindow):
         self.main_box.pack_start(self.journal_tab, False, False, 0)
         body.pack_start(self.main_box, False, False, 0)
 
-        self.add(body)
-        body.show_all()
+        self.outer = capped(body)  # capped to the monitor in present_at_top_right, for small screens
+        self.outer.set_propagate_natural_width(True)
+        self.add(self.outer)
+        self.outer.show_all()
+
+    def build_settings_page(self):
+        """⚙ → Appearance…: Auto / Light / Dark, then a theme for each. Choices apply at once."""
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        row = Gtk.Box(spacing=8)
+        back = Gtk.Button(label="‹ Back", tooltip_text="Back to the panel (Esc)")
+        back.connect("clicked", lambda *a: self.open_settings(False))
+        row.pack_start(back, False, False, 0)
+        row.pack_start(label("SETTINGS", "section"), False, False, 0)
+        page.pack_start(row, False, False, 0)
+        page.pack_start(Gtk.Separator(), False, False, 0)
+
+        page.pack_start(label("APPEARANCE", "section"), False, False, 0)
+        row = Gtk.Box(spacing=10)
+        modes, self.mode_buttons = toggle_group([("auto", "Auto"), ("light", "Light"), ("dark", "Dark")],
+                                                lambda m: self.syncing or self.set_theme(mode=m))
+        row.pack_start(modes, False, False, 0)
+        self.mode_hint = label("", "dim")
+        row.pack_start(self.mode_hint, False, False, 0)
+        page.pack_start(row, False, False, 0)
+
+        columns = Gtk.Box(spacing=16, homogeneous=True)
+        self.theme_buttons = {}
+        for variant in ("light", "dark"):
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            col.pack_start(label(f"{variant.upper()} THEME", "section"), False, False, 0)
+            first = None
+            for key, (name, *_) in THEMES.items():
+                button = Gtk.RadioButton.new_from_widget(first)
+                button.get_style_context().add_class("theme-choice")
+                box = Gtk.Box(spacing=8)
+                box.pack_start(label(name, chars=11), False, False, 0)
+                box.pack_start(swatch(key, variant), False, False, 0)
+                button.add(box)
+                button.connect("toggled", lambda b, v=variant, k=key: b.get_active() and not self.syncing
+                               and self.set_theme(**{v: k}))
+                first = first or button
+                self.theme_buttons[(variant, key)] = button
+                col.pack_start(button, False, False, 0)
+            columns.pack_start(col, True, True, 0)
+        page.pack_start(columns, False, False, 0)
+        page.pack_start(label("Auto follows your desktop's light or dark style. Only this panel changes.",
+                              "dim", wrap=True), False, False, 0)
+        return page
 
     def build_entry_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -305,6 +652,8 @@ class Panel(Gtk.ApplicationWindow):
 
         self.edit_banner = label("✎ Editing a logged entry — Save updates it, Esc cancels", "accent", "banner")
         box.pack_start(self.edit_banner, False, False, 0)
+        self.pick_banner = label("", "accent", "banner", ellipsize=Pango.EllipsizeMode.END)
+        box.pack_start(self.pick_banner, False, False, 0)
 
         self.task_label = label("TASK", "section", ellipsize=Pango.EllipsizeMode.MIDDLE)
         box.pack_start(self.task_label, False, False, 0)
@@ -373,6 +722,48 @@ class Panel(Gtk.ApplicationWindow):
         row.pack_end(self.cancel_button, False, False, 0)
         box.pack_start(row, False, False, 0)
 
+        self.meetings_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.meetings_box.pack_start(Gtk.Separator(), False, False, 0)
+        row = Gtk.Box(spacing=6)
+        self.meetings_label = label("MEETINGS", "section")
+        row.pack_start(self.meetings_label, False, False, 0)
+        self.hidden_button = Gtk.ToggleButton(tooltip_text="Meetings you marked as not work — restore one from here")
+        self.hidden_button.get_style_context().add_class("flat")
+        self.hidden_button.add(label("", "dim"))
+        self.hidden_button.connect("toggled", lambda *a: self.syncing or self.render_meetings())
+        row.pack_start(self.hidden_button, False, False, 0)
+        self.log_meetings_button = Gtk.Button(valign=Gtk.Align.CENTER,
+                                              tooltip_text="Log the ticked meetings as DONE entries")
+        self.log_meetings_button.connect("clicked", lambda *a: self.log_meetings())
+        row.pack_end(self.log_meetings_button, False, False, 0)
+        self.meetings_box.pack_start(row, False, False, 0)
+        row = Gtk.Box(spacing=6)
+        self.calendar_error = label("", "urgent", wrap=True)
+        row.pack_start(self.calendar_error, True, True, 0)
+        self.calendar_button = Gtk.Button(label="Link again", valign=Gtk.Align.CENTER)
+        self.calendar_button.connect("clicked", self.set_up_calendar)
+        row.pack_end(self.calendar_button, False, False, 0)
+        self.meetings_box.pack_start(row, False, False, 0)
+        self.bulk_row = Gtk.Box(spacing=6)
+        self.all_check = Gtk.CheckButton(label="all", tooltip_text="Tick or untick every meeting")
+        self.all_check.connect("toggled", self.on_all_toggled)
+        self.bulk_row.pack_start(self.all_check, False, False, 0)
+        self.bulk_task = Gtk.Button(tooltip_text="Pick one task for every ticked meeting that has none")
+        self.bulk_task.get_style_context().add_class("compact")
+        self.bulk_task.connect("clicked", lambda *a: self.start_task_search("ticked"))
+        self.bulk_row.pack_start(self.bulk_task, False, False, 0)
+        self.meetings_box.pack_start(self.bulk_row, False, False, 0)
+        self.meetings_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.meetings_scroll = capped(self.meetings_list)
+        self.meetings_box.pack_start(self.meetings_scroll, False, False, 0)
+        self.hidden_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.hidden_list.get_style_context().add_class("banner")
+        self.hidden_list.pack_start(label("NOT WORK — HIDDEN", "section"), False, False, 0)
+        self.hidden_rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.hidden_list.pack_start(self.hidden_rows, False, False, 0)
+        self.meetings_box.pack_start(self.hidden_list, False, False, 0)
+        box.pack_start(self.meetings_box, False, False, 0)
+
         box.pack_start(Gtk.Separator(), False, False, 0)
         row = Gtk.Box()
         self.logged_label = label("LOGGED TODAY", "section")
@@ -382,7 +773,8 @@ class Panel(Gtk.ApplicationWindow):
         box.pack_start(row, False, False, 0)
 
         self.entries_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        box.pack_start(self.entries_list, False, False, 0)
+        self.entries_scroll = capped(self.entries_list)
+        box.pack_start(self.entries_scroll, False, False, 0)
         self.nothing_logged = label("Nothing logged yet", "dim")
         box.pack_start(self.nothing_logged, False, False, 0)
         self.repeat_button = Gtk.Button(halign=Gtk.Align.START,
@@ -516,6 +908,18 @@ class Panel(Gtk.ApplicationWindow):
             self.session_button.set_label("Update session")
 
         self.main_box.set_visible(self.has_data)
+        linked = bool(self.data.get("calendar"))
+        self.clear_session_item.set_sensitive(self.has_data or not self.needs_session)
+        self.clear_calendar_item.set_sensitive(linked)
+        self.confirm_box.set_visible(bool(self.confirm))
+        if self.confirm:
+            self.confirm_text.set_text(CONFIRM[self.confirm][0])
+            self.confirm_yes.get_child().set_text(CONFIRM[self.confirm][1])
+        self.calendar_link.set_visible(self.has_data)
+        self.calendar_link.set_label("Calendar" if linked else "Link calendar")
+        self.calendar_link.set_tooltip_text(
+            "Link another Google Calendar, or a new secret address" if linked else
+            "Link your Google Calendar to log meetings from here (opens a terminal to paste its secret iCal address)")
         self.render_week()
         self.entry_tab.set_visible(self.tab == "entry")
         self.journal_tab.set_visible(self.tab == "journal")
@@ -536,8 +940,58 @@ class Panel(Gtk.ApplicationWindow):
         self.render_tasks()
         self.render_form()
         self.render_entries()
+        self.render_meetings()
         self.render_journal()
         self.render_timer()
+        self.render_settings()
+        self.fit_to_screen()
+
+    def render_settings(self):
+        self.settings_page.set_visible(self.settings_open)
+        if self.settings_open:
+            for widget in (self.session_box, self.week_box, self.main_box):
+                widget.set_visible(False)
+        look = self.appearance
+        syncing, self.syncing = self.syncing, True
+        self.mode_buttons[look.settings["mode"]].set_active(True)
+        for variant in ("light", "dark"):
+            self.theme_buttons[(variant, look.settings[variant])].set_active(True)
+        self.syncing = syncing
+        self.mode_hint.set_text(f"desktop is {'dark' if look.desktop_dark() else 'light'} now"
+                                if look.settings["mode"] == "auto" else "")
+        sibling = theme_sibling(look.desktop_theme, False), theme_sibling(look.desktop_theme, True)
+        for variant, dark in (("light", False), ("dark", True)):
+            self.theme_buttons[(variant, "desktop")].set_tooltip_text(
+                f"Your desktop theme's colours ({sibling[dark]})" if sibling[dark] else
+                f"Your desktop theme has no {variant} variant — {THEMES[FALLBACK_THEME[dark]][0]} is used")
+
+    def open_settings(self, show):
+        self.settings_open = show
+        self.render()
+
+    def set_theme(self, **values):
+        self.appearance.set(**values)
+        self.on_theme_changed()
+
+    def on_theme_changed(self):
+        self.render()
+
+    def queue_fit(self):
+        """fit_to_screen once the current change is done; for updates that don't go through render()."""
+        if not getattr(self, "_fit_queued", False):
+            self._fit_queued = True
+            GLib.idle_add(self.fit_to_screen)
+
+    def fit_to_screen(self):
+        """As tall as the content, but never past the bottom of the monitor (it scrolls there)."""
+        body = self.outer.get_child()
+        natural = body.get_preferred_height_for_width(body.get_preferred_width()[1])[1]  # wrapped labels need a width
+        height = min(natural, self.screen_height or natural)
+        self.outer.set_min_content_height(-1)
+        self.outer.set_max_content_height(height)
+        self.outer.set_min_content_height(height)
+        self._fit_queued = False
+        return False
 
     def render_timer(self):
         timer = read_timer()
@@ -591,6 +1045,11 @@ class Panel(Gtk.ApplicationWindow):
         selected = self.task_label_for(self.selected_task) or (self.editing_task_label if self.editing else "")
         self.task_label.set_text("TASK" + (f"   ·   {selected}" if selected else ""))
         self.edit_banner.set_visible(self.editing)
+        self.queue_fit()
+        self.pick_banner.set_visible(bool(self.picking_for))
+        if self.picking_for:
+            titles = [m["title"] for m in self.visible_meetings() if m["key"] in self.picking_keys()]
+            self.pick_banner.set_text(f"Picking a task for: {', '.join(titles) or 'nothing'} — Enter picks, Esc cancels")
         self.cancel_button.set_visible(self.editing)
         self.undo_button.set_visible(bool(self.undo) and not self.busy)
         self.start_button.set_visible(not self.editing and self.day_offset == 0 and not read_timer())
@@ -608,7 +1067,11 @@ class Panel(Gtk.ApplicationWindow):
         self.save_button.set_sensitive(not self.busy and bool(self.selected_task) and bool(self.entry_type) and duration_ok)
 
     def render_entries(self):
+        keep_scroll(self.entries_scroll, self.build_entry_rows)
+
+    def build_entry_rows(self):
         day = self.day
+        timed = any(e.get("startTime") for e in day.get("entries") or [])  # meetings logged from the calendar
         self.logged_label.set_text(f"LOGGED {self.day_name.upper()}")
         self.logged_total.set_text(format_minutes(day["totalMinutes"]))
         for child in self.entries_list.get_children():
@@ -618,8 +1081,10 @@ class Panel(Gtk.ApplicationWindow):
             editing = self.editing and cid == self.editing_id
             box = Gtk.Box(spacing=12)
             status = entry.get("status") or "DONE"
+            if timed:
+                box.pack_start(label((entry.get("startTime") or "")[:5], "dim", chars=5), False, False, 0)
             box.pack_start(label(format_minutes(entry["duration"]) if entry.get("duration") else "—",
-                                 "dim", xalign=1.0, chars=6), False, False, 0)
+                                 "dim", xalign=1.0, chars=4 if timed else 6), False, False, 0)
             box.pack_start(label(entry.get("task") or "?", "accent" if editing else "",
                                  ellipsize=Pango.EllipsizeMode.MIDDLE, chars=20), False, False, 0)
             if status != "DONE":
@@ -644,6 +1109,7 @@ class Panel(Gtk.ApplicationWindow):
                 row.get_style_context().add_class("editing")
             self.entries_list.add(row)
         self.entries_list.show_all()
+        set_rows(self.entries_scroll, self.entries_list.get_children(), ENTRY_ROWS)
         self.nothing_logged.set_text("Nothing logged yet" if self.day_loaded else "Loading…")
         self.nothing_logged.set_visible(not day.get("entries"))
         repeat = self.repeatable()
@@ -653,6 +1119,232 @@ class Panel(Gtk.ApplicationWindow):
                 f"{dt.date.fromisoformat(repeat[0]):%A}"
             minutes = sum(e.get("duration") or 0 for e in repeat[1])
             self.repeat_button.set_label(f"⟳ Repeat {name}  ({len(repeat[1])} entries · {format_minutes(minutes)})")
+
+    def visible_meetings(self):
+        """The day's meetings not logged yet that have started (you can't log a meeting ahead)."""
+        now = dt.datetime.now().astimezone()
+        return [m for m in self.day.get("meetings") or [] if dt.datetime.fromisoformat(m["start"]) <= now]
+
+    def meeting_pick(self, meeting):
+        """Choices for a meeting row; the first time, from what was used for it before. A meeting
+        still going on starts unticked, and so does one with no task yet."""
+        if meeting["key"] not in self.meeting_picks:
+            suggest = meeting.get("suggest") or {}
+            ended = dt.datetime.fromisoformat(meeting["end"]) <= dt.datetime.now().astimezone()
+            self.meeting_picks[meeting["key"]] = {
+                "on": ended and bool(suggest.get("task")), "duration": format_minutes(meeting["minutes"]),
+                "task": str(suggest.get("task") or ""), "type": suggest.get("type") or self.meeting_type(suggest.get("task"))}
+        return self.meeting_picks[meeting["key"]]
+
+    def meeting_type(self, task_id):
+        keys = [t["key"] for t in self.data.get("types") or []]
+        last = (self.data.get("lastTypeByTask") or {}).get(str(task_id or ""))
+        return last or ("INTERNAL_MEETING" if "INTERNAL_MEETING" in keys else self.default_type())
+
+    def render_meetings(self):
+        meetings = self.visible_meetings()
+        error = self.data.get("calendarError") or ""
+        hidden = self.hidden_meetings()
+        self.meetings_box.set_visible(bool(self.data.get("calendar")) and bool(meetings or error or hidden))
+        self.render_hidden(hidden)
+        self.calendar_error.set_visible(bool(error))
+        self.calendar_button.set_visible(bool(error))
+        self.calendar_error.set_text(f"Calendar: {error}" if error else "")
+        self.meetings_label.set_text(f"MEETINGS · {len(meetings)} TO LOG" if meetings else "MEETINGS")
+        shown = (tuple(m["key"] for m in meetings), tuple(self.data.get("recentTaskIds") or []),
+                 len(self.data.get("types") or []))
+        if shown != self.meetings_shown:
+            self.meetings_shown = shown
+            keep_scroll(self.meetings_scroll, lambda: self.build_meeting_rows(meetings))
+        self.render_meetings_button()
+
+    def hidden_meetings(self):
+        """The day's started meetings marked as not work (✕), which can be restored."""
+        now = dt.datetime.now().astimezone()
+        return [m for m in self.day.get("hidden") or [] if dt.datetime.fromisoformat(m["start"]) <= now]
+
+    def render_hidden(self, hidden):
+        """The "N hidden" toggle in the Meetings header, and the list it opens with ↶ Restore per meeting."""
+        self.hidden_button.set_visible(bool(hidden))
+        self.hidden_button.get_child().set_text(f"{len(hidden)} hidden")
+        if not hidden and self.hidden_button.get_active():
+            syncing, self.syncing = self.syncing, True
+            self.hidden_button.set_active(False)
+            self.syncing = syncing
+        self.hidden_list.set_visible(bool(hidden) and self.hidden_button.get_active())
+        if [m["key"] for m in hidden] == getattr(self, "_hidden_shown", None):
+            return
+        self._hidden_shown = [m["key"] for m in hidden]
+        for child in self.hidden_rows.get_children():
+            self.hidden_rows.remove(child)
+        for meeting in hidden:
+            row = Gtk.Box(spacing=6)
+            row.pack_start(label(f"{dt.datetime.fromisoformat(meeting['start']):%H:%M}", "dim"), False, False, 0)
+            row.pack_start(label(meeting["title"], "dim", ellipsize=Pango.EllipsizeMode.END), True, True, 0)
+            restore = Gtk.Button(tooltip_text="Offer this meeting again")
+            restore.get_style_context().add_class("flat")
+            restore.add(label("↶ Restore", "accent"))
+            restore.connect("clicked", lambda *a, m=meeting: self.restore_meeting(m))
+            row.pack_end(restore, False, False, 0)
+            self.hidden_rows.pack_start(row, False, False, 0)
+        self.hidden_rows.show_all()
+        self.queue_fit()
+
+    def build_meeting_rows(self, meetings):
+        """One line per meeting:  ☑ 10:00 Standup  [30m] […RN Upgrade ▾] [Meet·I] ✕"""
+        for child in self.meetings_list.get_children():
+            self.meetings_list.remove(child)
+        self.meeting_rows = {}
+        types = [(t["key"], t["label"]) for t in self.data.get("types") or []]
+        latest_end = None
+        for meeting in meetings:
+            pick = self.meeting_pick(meeting)
+            start, end = dt.datetime.fromisoformat(meeting["start"]), dt.datetime.fromisoformat(meeting["end"])
+            overlaps = latest_end is not None and start < latest_end[0]
+            row = Gtk.Box(spacing=4)
+            check = Gtk.CheckButton(active=pick["on"])
+            check.connect("toggled", lambda b, p=pick: p.update(on=b.get_active()) or self.render_meetings_button())
+            row.pack_start(check, False, False, 0)
+            row.pack_start(label(f"{start:%H:%M}", "urgent" if overlaps else "dim"), False, False, 0)
+            title = label(meeting["title"], ellipsize=Pango.EllipsizeMode.END)
+            title.set_width_chars(12)  # at least "Frontend tea…"; the panel grows a little for it
+            title.set_tooltip_text(f"{meeting['title']}\n{start:%H:%M}–{end:%H:%M}" +
+                                   (f"\n⚠ Overlaps {latest_end[1]} — shorten one of them" if overlaps else ""))
+            row.pack_start(title, True, True, 0)
+
+            duration = Gtk.Entry(text=pick["duration"], width_chars=4, max_width_chars=4,
+                                 tooltip_text="Time to log (e.g. 30m, 1h, 1.5)")
+            duration.get_style_context().add_class("compact")
+            duration.connect("changed", self.on_meeting_duration, pick)
+            row.pack_start(duration, False, False, 0)
+
+            task_button = Gtk.Button()  # opens the TASK search above: recent tasks, one click, or type
+            task_button.get_style_context().add_class("compact")
+            task_button.add(label("", ellipsize=Pango.EllipsizeMode.MIDDLE, chars=18))
+            task_button.connect("clicked", lambda *a, k=meeting["key"]: self.start_task_search([k]))
+            row.pack_start(task_button, False, False, 0)
+
+            type_button = Gtk.MenuButton(tooltip_text=self.type_label(pick["type"]))
+            type_button.get_style_context().add_class("compact")
+            type_button.add(label(short_type(self.type_label(pick["type"])), "dim", chars=6))  # same width in every row
+            menu = Gtk.Menu()
+            for key, text in types:
+                item = Gtk.MenuItem(label=text)
+                item.connect("activate", lambda i, k=key, b=type_button, p=pick: self.set_meeting_type(p, b, k))
+                menu.append(item)
+            menu.show_all()
+            type_button.set_popup(menu)
+            row.pack_start(type_button, False, False, 0)
+
+            dismiss = Gtk.Button(label="✕", tooltip_text="Not work — hide it (restore it from “hidden” next to MEETINGS)")
+            dismiss.get_style_context().add_class("flat")
+            dismiss.connect("clicked", lambda *a, m=meeting: self.dismiss_meeting(m))
+            row.pack_start(dismiss, False, False, 0)
+            self.meetings_list.pack_start(row, False, False, 0)
+            widgets = {"row": row, "check": check, "task": task_button, "type": type_button, "duration": duration}
+            self.meeting_rows[meeting["key"]] = widgets
+            self.show_meeting_task(widgets, pick["task"])
+            if latest_end is None or end > latest_end[0]:
+                latest_end = (end, meeting["title"])
+        self.meetings_list.show_all()
+        set_rows(self.meetings_scroll, self.meetings_list.get_children(), MEETING_ROWS, spacing=2)
+
+    def show_meeting_task(self, widgets, task_id):
+        full = self.task_label_for(task_id)
+        widgets["task"].get_child().set_text(short_task(full) if full else "Choose task…")
+        set_classes(widgets["task"].get_child(), "" if full else "dim")
+        widgets["task"].set_tooltip_text(f"{full}\nClick to change" if full else "Click to pick a task")
+
+    @property
+    def meeting_combos(self):
+        """Type menus of the Meetings list, so an open one doesn't close the panel."""
+        return [w["type"] for w in self.meeting_rows.values()]
+
+    def set_meeting_type(self, pick, button, key):
+        pick["type"] = key
+        text = self.type_label(key)
+        button.get_child().set_text(short_type(text))
+        button.set_tooltip_text(text)
+        self.render_meetings_button()
+
+    def type_label(self, key):
+        return next((t["label"] for t in self.data.get("types") or [] if t["key"] == key), key or "Type")
+
+    def on_meeting_duration(self, entry, pick):
+        pick["duration"] = entry.get_text()
+        entry.get_style_context().remove_class("problem")
+        self.render_meetings_button()
+
+    def set_meeting_task(self, key, task_id):
+        """Choosing a task ticks the meeting and brings that task's usual type."""
+        pick, widgets = self.meeting_picks[key], self.meeting_rows.get(key)
+        pick["task"] = task_id
+        if not widgets:
+            return
+        self.show_meeting_task(widgets, task_id)
+        widgets["task"].get_style_context().remove_class("problem")
+        if task_id:
+            self.set_meeting_type(pick, widgets["type"], self.meeting_type(task_id))
+            widgets["check"].set_active(True)
+        self.render_meetings_button()
+
+    def on_all_toggled(self, check):
+        if self.syncing:
+            return
+        for widgets in self.meeting_rows.values():
+            widgets["check"].set_active(check.get_active())
+
+    def ticked_without_task(self):
+        return [m["key"] for m, p in self.chosen_meetings() if not p["task"]]
+
+    def picking_keys(self):
+        return self.ticked_without_task() if self.picking_for == "ticked" else self.picking_for or []
+
+    def start_task_search(self, keys):
+        """Use the TASK search above to pick a task for these meetings (Enter / click picks, Esc cancels)."""
+        self.picking_for = keys
+        self.task_field.set_text("")
+        self.render_form()
+        self.task_field.grab_focus()
+
+    def stop_task_search(self):
+        self.picking_for = None
+        self.task_field.set_text("")
+        self.render()
+
+    def chosen_meetings(self):
+        return [(m, self.meeting_picks[m["key"]]) for m in self.visible_meetings()
+                if self.meeting_picks.get(m["key"], {}).get("on")]
+
+    def meeting_problems(self):
+        """Ticked meetings that can't be logged yet: [(key, "task" | "duration")], top to bottom."""
+        return [(m["key"], "task" if not (p["task"] and p["type"]) else "duration")
+                for m, p in self.chosen_meetings()
+                if not (p["task"] and p["type"]) or not parse_duration(p["duration"])]
+
+    def render_meetings_button(self):
+        chosen, problems = self.chosen_meetings(), self.meeting_problems()
+        no_task = sum(kind == "task" for _, kind in problems)
+        bad_time = len(problems) - no_task
+        text = f"Log {len(chosen)}" if chosen else "Log"
+        if no_task:
+            text += f" · {no_task} need{'s' if no_task == 1 else ''} a task"
+        elif bad_time:
+            text += f" · {bad_time} need{'s' if bad_time == 1 else ''} a time"
+        self.log_meetings_button.set_label("Saving…" if self.busy else text)
+        self.log_meetings_button.set_sensitive(not self.busy and bool(chosen))
+        self.log_meetings_button.set_tooltip_text(
+            "Show the first meeting that needs fixing" if problems else "Log the ticked meetings as DONE entries")
+
+        rows = self.meeting_rows
+        self.bulk_row.set_visible(len(rows) > 1)
+        syncing, self.syncing = self.syncing, True
+        self.all_check.set_active(bool(rows) and all(w["check"].get_active() for w in rows.values()))
+        missing = len(self.ticked_without_task())
+        self.bulk_task.set_label(f"Choose task for {missing} ticked…")
+        self.bulk_task.set_visible(missing > 0)
+        self.queue_fit()
+        self.syncing = syncing
 
     def render_journal(self):
         possessive = f"{self.day_name.upper()}'S"
@@ -681,6 +1373,7 @@ class Panel(Gtk.ApplicationWindow):
             self.render_journal_hint(text, kind)
             return
         self.entry_message.set_text(text)
+        self.queue_fit()
         set_classes(self.entry_message, {"ok": "accent", "error": "urgent", "auth": "urgent"}.get(kind, ""))
 
     # ---------------------------------------------------------------- handlers
@@ -720,6 +1413,10 @@ class Panel(Gtk.ApplicationWindow):
         (self.task_field if self.tab == "entry" else self.note_field).grab_focus()
 
     def pick_task(self, task_id):
+        if self.picking_for:
+            for key in self.picking_keys():
+                self.set_meeting_task(key, task_id)
+            return self.stop_task_search()
         self.selected_task = task_id
         last = (self.data.get("lastTypeByTask") or {}).get(task_id)
         self.entry_type = last or self.entry_type or self.default_type()
@@ -744,7 +1441,13 @@ class Panel(Gtk.ApplicationWindow):
 
     def on_key(self, widget, event):
         if event.keyval == Gdk.KEY_Escape:
-            if self.editing:
+            if self.settings_open:
+                self.open_settings(False)
+            elif self.confirm:
+                self.ask_confirm(None)
+            elif self.picking_for:
+                self.stop_task_search()
+            elif self.editing:
                 self.cancel_edit()
             else:
                 self.hide()
@@ -763,7 +1466,9 @@ class Panel(Gtk.ApplicationWindow):
             GLib.timeout_add(200, self.hide_if_inactive)
 
     def hide_if_inactive(self):
-        if not self.is_active() and not self.type_combo.props.popup_shown and self.get_visible():
+        popup = any(c.props.popup_shown if isinstance(c, Gtk.ComboBox) else c.get_active()
+                    for c in [self.type_combo, self.settings, *self.meeting_combos])
+        if not self.is_active() and not popup and self.get_visible():
             self.hide()
         return False
 
@@ -895,6 +1600,65 @@ class Panel(Gtk.ApplicationWindow):
         self.show_message("Timer discarded")
         self.render()
 
+    def log_meetings(self):
+        chosen = self.chosen_meetings()
+        if self.busy or not chosen:
+            return
+        problems = self.meeting_problems()
+        if problems:
+            return self.show_meeting_problem(*problems[0])
+        fields = [{"date": self.day_iso, "task": p["task"], "type": p["type"], "status": "DONE",
+                   "duration": parse_duration(p["duration"]), "description": m["title"],
+                   "startTime": m["start"][11:16] + ":00", "uid": m["uid"], "title": m["title"]} for m, p in chosen]
+        self.run_cli(["log-meetings", json.dumps(fields)], "meetings",
+                     f"{len(fields)} meeting{'s' if len(fields) > 1 else ''}")
+
+    def show_meeting_problem(self, key, kind):
+        """Scroll the Meetings list to the first ticked meeting that can't be logged and outline what's missing."""
+        widgets = self.meeting_rows[key]
+        widget = widgets["task"] if kind == "task" else widgets["duration"]
+        widget.get_style_context().add_class("problem")
+        y = widgets["row"].translate_coordinates(self.meetings_list, 0, 0)[1]
+        self.meetings_scroll.get_vadjustment().set_value(max(0, y - 4))
+        widget.grab_focus()
+        title = next(m["title"] for m in self.visible_meetings() if m["key"] == key)
+        self.show_message(f"“{title}” needs a {'task' if kind == 'task' else 'time, like 30m or 1h'}", "error")
+
+    def dismiss_meeting(self, meeting):
+        """Local only (no network), so it runs right here; state.json changes and the list follows."""
+        subprocess.run([CLI, "dismiss-meeting", meeting["key"]], capture_output=True)
+        self.meeting_picks.pop(meeting["key"], None)
+        self.load_state()
+        self.show_message(f"Hidden “{meeting['title']}” — “hidden” next to MEETINGS brings it back")
+
+    def restore_meeting(self, meeting):
+        subprocess.run([CLI, "restore-meeting", meeting["key"]], capture_output=True)
+        self.load_state()
+        self.show_message(f"✓ “{meeting['title']}” is back in Meetings", "ok")
+
+    def ask_confirm(self, action):
+        """Show (or with None, dismiss) the confirmation banner for a ⚙ action."""
+        self.confirm = action
+        self.render()
+        if action:
+            self.confirm_yes.grab_focus()
+
+    def confirmed(self):
+        action, self.confirm = self.confirm, None
+        result = subprocess.run([CLI, f"clear-{action}"], capture_output=True, text=True)
+        ok = result.returncode == 0
+        if action == "calendar":
+            self.meeting_picks, self.meetings_shown, self.picking_for = {}, None, None
+        self.load_state()
+        self.show_message(("✓ Signed out — paste a session to connect again" if action == "session"
+                           else "✓ Google Calendar unlinked") if ok else
+                          f"Couldn't clear: {(result.stdout or result.stderr).strip()}", "ok" if ok else "error")
+        self.render()
+
+    def set_up_calendar(self, *args):
+        subprocess.Popen([CLI, "set-calendar", "--window"], start_new_session=True)
+        self.hide()
+
     def add_note(self):
         text = self.note_field.get_text().strip()
         if not self.busy and text:
@@ -975,6 +1739,9 @@ class Panel(Gtk.ApplicationWindow):
         elif action == "undo":
             notify(f"Restored {summary}", "edit-undo")
             self.show_message(f"✓ Restored {summary}", "ok")
+        elif action == "meetings":
+            notify(f"Logged {summary}")
+            self.show_message(f"✓ Logged {summary}", "ok")
         elif action == "copy":
             notify(f"Copied {summary} to today")
             self.show_message(f"✓ Copied {summary} to today", "ok")
@@ -1001,6 +1768,7 @@ class Panel(Gtk.ApplicationWindow):
         _, x, y = display.get_default_seat().get_pointer().get_position()
         geo = display.get_monitor_at_point(x, y).get_geometry()
         self.anchor = (geo.x + geo.width, geo.y + TOP_OFFSET)
+        self.screen_height = geo.height - TOP_OFFSET - EDGE_GAP
         self.keep_on_monitor()
         self.show()
         self.present_with_time(Gdk.CURRENT_TIME)
@@ -1018,11 +1786,7 @@ class App(Gtk.Application):
         self.window = None
 
     def do_startup(self):
-        Gtk.Application.do_startup(self)
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider,
-                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        Gtk.Application.do_startup(self)  # the stylesheet comes with the Panel's Appearance
 
     def do_command_line(self, command_line):
         args = command_line.get_arguments()[1:]

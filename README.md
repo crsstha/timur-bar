@@ -634,6 +634,7 @@ GNOME uses the same panel as i3, so the **i3** column applies to GNOME as well. 
 | Open Timur in browser   | Right-click                                 | Scroll down on the module, or the **Web ↗** button in the panel                                           |
 | Use rofi menus          | —                                           | Scroll up on the module, or run `timur-menu`                                                              |
 | Log in one line         | —                                           | `Super+Alt+q`, type `eoc 1.5 fixed login bug` (task words, time, description) or `helix todo write tests` |
+| Log your meetings       | Same as i3 →                                | Under **Meetings**, tick the ones that were work and **Log** — see [Google Calendar meetings](#google-calendar-meetings) |
 
 ### Logging time
 
@@ -686,6 +687,46 @@ Timur saves the complete journal at once.
 Because of this, `timur-bar` reads the latest journal again before saving it.
 
 **Do not edit the same day's journal in the Timur website at the same time.**
+
+### Google Calendar meetings
+
+The panel (Omarchy, i3 and GNOME) can list the meetings from your Google Calendar that you haven't logged yet, so you can log them with a click. It is optional and off until you connect a calendar — from the panel's **⚙** (Omarchy: **⚙ → Link Google Calendar…**; i3 and GNOME: the **Link calendar** button) or with `timur-bar set-calendar`.
+
+**Connect it** (once):
+
+1. In Google Calendar, open **⚙ Settings** → your calendar under **Settings for my calendars** → **Integrate calendar**.
+2. Copy **Secret address in iCal format**. If it isn't there, your Google Workspace admin has turned it off.
+3. Run:
+
+   ```bash
+   timur-bar set-calendar
+   ```
+
+   Paste the address and press `Enter` on an empty line. You can paste several (e.g. a team calendar too).
+
+The secret address lets anyone read your calendar, so treat it like a password. It is kept in `~/.config/timur-bar/calendar` (`chmod 600`) and never written to the cache or the log. If you ever share it by mistake, reset it on the same Google Calendar page and run `set-calendar` again.
+
+**Use it:** the **Meetings** section above **Logged today** shows meetings that:
+
+* have started (later ones appear once they begin; one still going on starts unticked),
+* have a start and end time (all-day events like holidays are left out),
+* you haven't declined,
+* and have no entry yet that starts at the same time.
+
+Each meeting is logged as a DONE entry with the meeting title as description, its length as duration (change it if the meeting ran short or long), and its start time. Pick a task and type for a new meeting; the next time the same meeting (or one with the same title) comes up, they are filled in and it is ticked. **⚠** means it overlaps an earlier meeting. **✕** hides a meeting that wasn't work, for good.
+
+Google can take a few hours to update the secret address after you change a meeting. Repeating meetings with an unusual rule are left out and named in `~/.cache/timur-bar/log`.
+
+To stop, use **⚙ → Unlink Google Calendar…** in the panel (Omarchy shows ⚙'s choices as a row of buttons under the header) (or `timur-bar clear-calendar`). The tasks it learned and the meetings you hid are kept, in case you link it again.
+
+### Themes
+
+On i3 and GNOME, **⚙ → Appearance…** in the panel opens its settings:
+
+* **Auto / Light / Dark** — Auto follows your desktop's light or dark style, and switches when the desktop does.
+* **Light theme** and **Dark theme** — the one used in each mode: Desktop (your GTK theme's own colours and accent), Tokyo Night (the original look), Terracotta, Catppuccin, Gruvbox, Monokai or Solarized.
+
+Choices apply at once and are saved in `~/.config/timur-bar/settings`. Only the panel changes: the bar text keeps following your bar or GNOME's top bar, and on Omarchy the panel follows the Omarchy theme.
 
 ## Setting it up for someone else / on another computer
 
@@ -940,6 +981,9 @@ The important idea is:
 | File or folder                  | What's inside                                                  |
 | ------------------------------- | -------------------------------------------------------------- |
 | `~/.config/timur-bar/session`   | Your saved Timur login. Private and protected with `chmod 600` |
+| `~/.config/timur-bar/calendar`  | Your Google Calendar secret address(es), `chmod 600` (optional) |
+| `~/.config/timur-bar/settings`  | Panel theme: `mode=`, `light=`, `dark=`                        |
+| `~/.cache/timur-bar/calendar.json` | Task and type used per meeting, and meetings you hid        |
 | `~/.cache/timur-bar/state.json` | Cached tasks, time entries, and journal data                   |
 | `~/.cache/timur-bar/log`        | Log of save attempts and their results                         |
 
@@ -952,6 +996,15 @@ timur-bar refresh
 timur-bar set-session [--window]
 # Connect or renew your Timur login
 # --window opens the session setup in a new terminal
+
+timur-bar clear-session
+# Sign out: delete the saved session and the cached timesheet (also ⚙ in the panel)
+
+timur-bar set-calendar [--window]
+# Connect Google Calendar (secret iCal address) for the Meetings list
+
+timur-bar clear-calendar
+# Unlink Google Calendar (also ⚙ in the panel)
 
 timur-bar bar [--polybar|--i3blocks|--json]
 # Print the bar text using cached data
@@ -968,6 +1021,12 @@ timur-bar delete-entry <clientId> [date]
 
 timur-bar add-note <date> "text"
 # Add a journal note
+
+timur-bar log-meetings '[{…add-entry fields…,"startTime":"10:00:00","uid":"…","title":"Standup"}]'
+# Log meetings and remember their task and type
+
+timur-bar dismiss-meeting <key>
+# Stop offering a meeting (no network request)
 
 timur-panel [journal] [--yesterday]
 # i3 and GNOME: open or close the Timur panel
@@ -1003,7 +1062,7 @@ Add these variables to:
 | `TIMUR_WEEK_TARGET`  | `40`                 | i3: weekly hours target shown in the panel's week strip            |
 | `TIMUR_REMIND_HOUR`    | `17`               | earliest hour for the reminder (set it in `~/.config/environment.d/timur.conf`, it runs from systemd) |
 | `TIMUR_REMIND_MINUTES` | `120`              | no reminder once this many minutes are logged today            |
-| `TERMINAL`           | First terminal found | Terminal used by `set-session --window`                            |
+| `TERMINAL`           | First terminal found | Terminal used by `set-session --window` and `set-calendar --window` |
 
 ## Notes for maintainers
 
