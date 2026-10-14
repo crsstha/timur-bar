@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "crsstha.timur",
+  "id": "togglecorp.timur",
   "name": "Timur",
   "version": "1.0.0",
-  "author": "crsstha",
+  "author": "Togglecorp",
   "description": "Today's logged time from Timur, with quick time-entry and journal-note forms. Data comes from bin/timur-bar.",
   "kinds": [
     "bar-widget"

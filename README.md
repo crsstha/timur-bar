@@ -109,7 +109,7 @@ This option lets you update the plugin later using `omarchy plugin update`.
 ```bash
 omarchy plugin add https://github.com/crsstha/timur-bar.git --enable
 
-cd ~/.config/omarchy/plugins/crsstha.timur
+cd ~/.config/omarchy/plugins/togglecorp.timur
 ```
 
 ### 2. Run the installer
@@ -823,7 +823,7 @@ cd ~/Projects/timur-bar && git pull
 If you installed it using the Omarchy plugin manager:
 
 ```bash
-omarchy plugin update crsstha.timur
+omarchy plugin update togglecorp.timur
 ```
 
 Then run:
