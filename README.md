@@ -834,6 +834,8 @@ Then run:
 
 It is safe to run the installer again. It will use the latest files.
 
+After that, press `Super+Alt+R` (or run `timur-restart`) after each `git pull` to load the new code.
+
 On Omarchy, reload the panel with:
 
 ```bash

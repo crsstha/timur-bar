@@ -1,0 +1,11 @@
+#!/bin/bash
+# Pick up a `git pull`: reload the systemd units, close the panel so its next open runs the
+# new code, refresh the cache and, on Omarchy, restart the bar. The i3/polybar/GNOME bar text
+# re-runs `timur-bar` every few seconds, so it updates on its own; a changed GNOME extension
+# still needs a log out.
+systemctl --user daemon-reload
+pkill -f "$HOME/.local/bin/timur-panel"
+systemctl --user --no-block start timur-bar-refresh.service
+command -v omarchy >/dev/null 2>&1 && omarchy restart shell
+command -v notify-send >/dev/null 2>&1 && notify-send "Timur" "Restarted with the latest code"
+exit 0

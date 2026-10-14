@@ -27,7 +27,7 @@ systemctl --user disable --now timur-bar-refresh.timer timur-bar-remind.timer >/
 for unit in "$REPO"/systemd/*; do unlink_if_ours "$HOME/.config/systemd/user/$(basename "$unit")"; done
 systemctl --user daemon-reload
 
-for f in timur-bar timur-panel timur-menu timur-remind i3blocks-timur; do unlink_if_ours "$HOME/.local/bin/$f"; done
+for f in timur-bar timur-panel timur-menu timur-remind timur-restart i3blocks-timur; do unlink_if_ours "$HOME/.local/bin/$f"; done
 
 if command -v omarchy >/dev/null 2>&1; then
   omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1 || true
